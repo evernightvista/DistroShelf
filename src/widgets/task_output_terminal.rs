@@ -108,6 +108,15 @@ impl TaskOutputTerminal {
             .build();
 
         self.set_child(Some(&scrolled_window));
+
+        let shortcut_controller = gtk::ShortcutController::new();
+        let copy_trigger = gtk::ShortcutTrigger::parse_string("<Control><Shift>c")
+            .expect("Invalid copy shortcut trigger");
+        shortcut_controller.add_shortcut(gtk::Shortcut::new(
+            Some(copy_trigger),
+            Some(gtk::NamedAction::new("terminal.copy")),
+        ));
+        terminal.add_controller(shortcut_controller);
     }
 
     /// Write a line to the terminal with proper ANSI code handling

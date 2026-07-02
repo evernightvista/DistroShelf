@@ -9,6 +9,7 @@ use gtk::{
 use vte4::prelude::*;
 
 use crate::i18n::gettext;
+use crate::widgets::DistroShelfWindow;
 use crate::{fakers::CommandRunner, gtk_utils::ColorPalette, models::RootStore};
 use std::cell::OnceCell;
 
@@ -106,8 +107,13 @@ impl IntegratedTerminal {
         copy_action.connect_activate(clone!(
             #[weak]
             terminal,
+            #[weak(rename_to=this)]
+            self,
             move |_, _| {
                 terminal.copy_clipboard_format(vte4::Format::Text);
+                if let Some(win) = this.root().and_downcast::<DistroShelfWindow>() {
+                    win.add_toast(adw::Toast::new(&gettext("Text copied")));
+                }
             }
         ));
         action_group.add_action(&copy_action);
@@ -178,6 +184,24 @@ impl IntegratedTerminal {
                 this.spawn_terminal();
             }
         ));
+
+        let shortcut_controller = gtk::ShortcutController::new();
+
+        let copy_trigger = gtk::ShortcutTrigger::parse_string("<Control><Shift>c")
+            .expect("Invalid copy shortcut trigger");
+        shortcut_controller.add_shortcut(gtk::Shortcut::new(
+            Some(copy_trigger),
+            Some(gtk::NamedAction::new("terminal.copy")),
+        ));
+
+        let paste_trigger = gtk::ShortcutTrigger::parse_string("<Control><Shift>v")
+            .expect("Invalid paste shortcut trigger");
+        shortcut_controller.add_shortcut(gtk::Shortcut::new(
+            Some(paste_trigger),
+            Some(gtk::NamedAction::new("terminal.paste")),
+        ));
+
+        terminal.add_controller(shortcut_controller);
 
         self.set_child(Some(&terminal_overlay));
     }
