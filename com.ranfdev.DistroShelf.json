@@ -20,7 +20,8 @@
         "prepend-path": "/app/bin:/usr/bin",
         "append-path" : "/usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm20/bin",
         "build-args" : [
-            "--share=network"
+            "--share=network",
+            "--filesystem=home"
         ],
         "env" : {
             "RUST_BACKTRACE" : "1",

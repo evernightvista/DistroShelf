@@ -2,6 +2,7 @@
 .vscode/*
 target/*
 _build/
+.flatpak-builder/
 .aider*
 .env
 src/config.rs
