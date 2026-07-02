@@ -27,9 +27,24 @@ impl ContainerRuntime for Docker {
         let mut cmd = Command::new("docker");
         cmd.arg("--version");
 
-        let output = self.cmd_runner.output_string(cmd).await?;
+        let output = self.cmd_runner.output(cmd).await?;
 
-        Ok(output.trim().to_string())
+        // A command that spawns but exits non-zero must be treated as "not
+        // installed". This matters under Flatpak, where the runtime check runs
+        // `flatpak-spawn --host podman --version`: flatpak-spawn itself spawns
+        // successfully, so without this check a missing host binary would be
+        // mistaken for an available runtime.
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "version check failed ({}): {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let version = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(version.trim().to_string())
     }
     async fn downloaded_images(&self) -> anyhow::Result<HashSet<String>> {
         let mut cmd = Command::new("docker");

@@ -20,7 +20,7 @@ use futures::{
     io::{AsyncRead, AsyncWrite, Cursor},
 };
 
-type ResponseFn = Rc<dyn Fn() -> Result<String, io::Error>>;
+type ResponseFn = Rc<dyn Fn() -> Result<(String, ExitStatus), io::Error>>;
 type ResponseMap = HashMap<Vec<String>, ResponseFn>;
 
 #[derive(Debug, Clone)]
@@ -203,8 +203,22 @@ impl NullCommandRunnerBuilder {
         cmd: Command,
         out: impl Fn() -> Result<String, io::Error> + 'static,
     ) -> &mut Self {
+        self.cmd_full_with_status(cmd, ExitStatus::from_raw(0), out)
+    }
+    /// Like [`cmd_full`](Self::cmd_full) but lets the response exit with a
+    /// non-zero status. This is useful to simulate commands that spawn
+    /// successfully but fail (e.g. `flatpak-spawn --host <missing-binary>`).
+    pub fn cmd_full_with_status(
+        &mut self,
+        cmd: Command,
+        status: ExitStatus,
+        out: impl Fn() -> Result<String, io::Error> + 'static,
+    ) -> &mut Self {
         let key = NullCommandRunner::key_for_cmd(&cmd);
-        self.responses.insert(key, Rc::new(out));
+        self.responses.insert(key, Rc::new(move || {
+            let s = out()?;
+            Ok((s, status))
+        }));
         self
     }
     #[allow(dead_code)]
@@ -247,9 +261,10 @@ impl InnerCommandRunner for NullCommandRunner {
             .responses
             .get(&key[..])
             .cloned()
-            .unwrap_or(Rc::new(|| Ok(String::new())));
-        let stub = StubChild::new_null(vec![], Cursor::new(response()?), Cursor::new(""), || {
-            Ok(ExitStatus::from_raw(0))
+            .unwrap_or(Rc::new(|| Ok((String::new(), ExitStatus::from_raw(0)))));
+        let (stdout, status) = response()?;
+        let stub = StubChild::new_null(vec![], Cursor::new(stdout), Cursor::new(""), move || {
+            Ok(status)
         });
         Ok(Box::new(stub))
     }
@@ -262,12 +277,13 @@ impl InnerCommandRunner for NullCommandRunner {
             .responses
             .get(&key[..])
             .cloned()
-            .unwrap_or(Rc::new(|| Ok(String::new())));
+            .unwrap_or(Rc::new(|| Ok((String::new(), ExitStatus::from_raw(0)))));
 
         async move {
+            let (stdout, status) = response()?;
             Ok(Output {
-                status: ExitStatus::from_raw(0),
-                stdout: response()?.into(),
+                status,
+                stdout: stdout.into(),
                 stderr: vec![],
             })
         }
