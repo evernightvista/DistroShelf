@@ -1,104 +1,82 @@
 # Flatpak Development Shell
 
-Enter an interactive shell inside the Flatpak SDK sandbox to run `meson`,
-`cargo`, and other build commands against the same toolchain the Flatpak build
-uses (Rust from `rust-stable`, `clang`/`mold` linker, VTE, etc.).
+`./flatpak-dev-shell.sh` drops you into an interactive bash inside the Flatpak
+SDK build sandbox — same toolchain the Flatpak build uses (Rust from
+`rust-stable`, `clang`/`mold` linker, VTE) — with sources extracted and meson
+already configured.
 
 ## Prerequisites
 
-- **Native `flatpak-builder` binary** (e.g. `dnf install flatpak-builder` on
-  Fedora). The Flatpak-packaged `org.flatpak.Builder` runs inside its own
-  sandbox and cannot spawn the nested `bwrap` namespace that an interactive
-  shell requires, so a native install is needed for `--build-shell`.
+- **Native `flatpak-builder`** (e.g. `dnf install flatpak-builder`). The
+  Flatpak-packaged `org.flatpak.Builder` runs in its own sandbox and can't spawn
+  the nested `bwrap` namespace that an interactive shell needs.
 
-- **GNOME SDK and extensions** listed in the manifest. Install any missing ones
-  once with:
-
+- **Dependencies built once** (and again after manifest changes):
   ```bash
-  flatpak-builder --disable-rofiles-fuse --install-deps-only _build com.ranfdev.DistroShelf.json
+  flatpak-builder --disable-rofiles-fuse --stop-at=distroshelf --force-clean _build com.ranfdev.DistroShelf.json
   ```
+  This builds VTE into `_build` and stops before compiling the project.
 
-> **Note** — every `flatpak-builder` invocation below passes
-> `--disable-rofiles-fuse` to bypass the FUSE/copy-on-write build layer, which
-> avoids FUSE-related issues and is harmless for dev work.
-
-## 1. Build dependencies (one-time, or after manifest changes)
-
-Build every module **up to** `distroshelf` (VTE and the runtime setup) but stop
-before compiling the project itself:
+## Usage
 
 ```bash
-flatpak-builder --disable-rofiles-fuse --stop-at=distroshelf --force-clean _build com.ranfdev.DistroShelf.json
+./flatpak-dev-shell.sh
 ```
 
-`--force-clean` wipes the output directory first so you start fresh. Omit it on
-later runs to reuse the cached VTE build.
-
-## 2. Enter the development shell
-
-### `--build-shell` (recommended)
-
-Drops you into `/run/build/distroshelf`, the prepared build directory with
-sources extracted and the build environment (`PATH`, env vars from
-`build-options`) configured:
+You land at `/run/build/distroshelf` (the project source root) with `cargo`,
+`meson`, `ninja`, `clang`, and `mold` on `PATH`. meson is already configured in
+`_flatpak_build/`, so iteration is fast:
 
 ```bash
-flatpak-builder --disable-rofiles-fuse --build-shell=distroshelf _build com.ranfdev.DistroShelf.json
-```
-
-#### Exposing the host home directory
-
-`--build-shell` enters the **build sandbox**, whose permissions come from
-`build-options.build-args` in the manifest — it does not accept `--filesystem`
-on the command line. To access the host home folder (e.g. for git config,
-credentials, or a shared cargo cache), keep `--filesystem=home` in `build-args`:
-
-```json
-"build-options" : {
-    "build-args" : [
-        "--share=network",
-        "--filesystem=home"
-    ],
-    ...
-}
-```
-
-The build sandbox's `$HOME` is build-managed, so reach the host home by its
-absolute path (e.g. `/var/home/fedora`). Use `--filesystem=host` instead if you
-need paths outside the home directory.
-
-### `--run` (fallback)
-
-If only the Flatpak-packaged `org.flatpak.Builder` is available, `--run` enters
-the sandbox through the Flatpak session helper (no nested `bwrap`) and accepts
-`--filesystem` directly on the command line:
-
-```bash
-flatpak run org.flatpak.Builder --disable-rofiles-fuse --run \
-  --filesystem=$(pwd) \
-  _build com.ranfdev.DistroShelf.json bash
-```
-
-## 3. Common commands inside the shell
-
-From the build directory (`/run/build/distroshelf` for `--build-shell`):
-
-```bash
-# Lint / format / test (same as the pre-commit hook)
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features
 cargo test --all-features
 
-# Full meson build
-meson setup _fpbuild --libdir=lib --prefix=/app
-ninja -C _fpbuild
-ninja -C _fpbuild install   # installs into the sandbox /app, not the host
+ninja -C _flatpak_build                 # rebuild
+ninja -C _flatpak_build install         # install into the sandbox /app
 ```
+
+To reach host files (e.g. a shared cargo cache, git credentials), use absolute
+host paths — the home folder is exposed via `--filesystem=home` in
+`build-options.build-args`, since the sandbox `$HOME` is build-managed.
+
+## How the script works
+
+`flatpak-builder --build-shell` has several non-obvious behaviors; the script
+encodes workarounds for each.
+
+**`--build-shell` prepares and runs meson.** It extracts the module's sources
+into `/run/build/<module>`, runs the meson configure step, then launches `/bin/sh`
+in the builddir (`_flatpak_build`). The script feeds two commands via stdin — a
+`cd` to the source root, then `exec bash -i </dev/tty` — so you start at the
+project root in a real interactive bash instead of inside `_flatpak_build`.
+
+**`$SHELL` is ignored.** `--build-shell` always uses `/bin/sh` regardless of the
+`$SHELL` env var, so the shell can't be swapped via the environment. Piping the
+setup commands and reconnecting to the controlling terminal (`/dev/tty`) is what
+makes the handoff work.
+
+**`--disable-rofiles-fuse` is always passed.** rofiles-fuse is broken on this
+host (mounts are sometimes not cleaned up and require a manual `umount`), so
+every `flatpak-builder` call disables it. This is also why `--run` is avoided: it
+forces rofiles-fuse and does not accept `--disable-rofiles-fuse`.
+
+**Stale build dirs are pruned.** `--build-shell` re-extracts the `dir` source
+into a fresh `<module>-N` directory on every run (the source is treated as
+changed each time, so caching never applies). The stable `<module>` symlink
+always points at the newest; the script deletes every other `<module>-N` dir,
+since nothing reuses them.
+
+**`_build` is the app prefix, not the meson build dir.** `_build` (the
+`flatpak-builder` DIRECTORY argument) holds every previously-built module
+installed into the app prefix and is mounted as `/app` in the sandbox — that's
+how VTE becomes visible to the project build. `_flatpak_build` is only meson's
+per-project output. The script refuses to run without `_build`, since the shell
+is useless without the dependencies in `/app`.
 
 ## Notes
 
-- `cargo` reads from the project's `target/` directory, so builds done here
-  share the same target cache as native builds **only** if the toolchain triplet
+- `cargo` shares `target/` with native builds **only** if the toolchain triplet
   and flags match. The Flatpak sandbox uses `clang` + `mold` (set in the
-  manifest), which differs from a default native setup. Clean `target/` if you
-  see confusing linker errors after switching between the two.
+  manifest), unlike a default native setup — clean `target/` if you see linker
+  errors after switching between the two.
