@@ -133,3 +133,25 @@ Shell script in `src/backends/distrobox/POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh` 
 
 ### GNOME Documentation Librarian Agent
 Call #tool:runSubagent with `gnome-doc-librarian` to fetch up-to-date documentation for GNOME libraries and components.
+
+### Version Control System
+jujutsu is the VCS used to manage the project. Run `jj -h` to see the full list of commands supported by the version installed.
+
+We follow the Scoped Commits standard. Scoped Commits is a loose standard for formatting commit messages that focuses on making the commit log quickly understandable to contributors.
+
+Normal commit messages should be formatted as follows:
+
+```
+<scope>: <description>
+
+[optional body]
+
+[optional trailer(s)]
+```
+
+where:
+- <scope> — the subsystem, area, or module that the commit touches
+- <description> — a short description of the changes made
+- [optional body] — detailed information about the changes
+- [optional trailer(s)] — additional metadata about the commit
+
