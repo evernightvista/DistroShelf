@@ -126,7 +126,7 @@ App automatically detects Flatpak environment and configures `CommandRunner`:
 `ContainerRuntime` trait (`src/backends/container_runtime.rs`) abstracts Podman/Docker:
 - Auto-detects available runtime at startup
 - Provides unified interface for images, events, container status
-- `RootStore::container_runtime` is a `Query<Rc<dyn ContainerRuntime>>`
+- `RootStore::container_runtime` is a `Query<DetectedRuntime>` (the detected runtime plus the version string obtained during detection)
 
 ### Desktop File Parsing
 Shell script in `src/backends/distrobox/POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh` finds and encodes desktop files from containers for app export. Uses hex-encoding to avoid shell escaping issues.

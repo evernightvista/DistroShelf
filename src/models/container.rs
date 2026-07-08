@@ -1,6 +1,6 @@
 use crate::{
     backends::{
-        ContainerInfo, Distrobox, Status, container_runtime::ContainerRuntime,
+        ContainerInfo, Distrobox, Status, container_runtime::DetectedRuntime,
         container_runtime::Usage,
     },
     gtk_utils::TypedListStore,
@@ -99,7 +99,7 @@ impl Container {
     pub fn from_info(
         distrobox: Distrobox,
         on_containers_changed: Rc<dyn Fn()>,
-        runtime_query: Query<Rc<dyn ContainerRuntime>>,
+        runtime_query: Query<DetectedRuntime>,
         value: ContainerInfo,
     ) -> Self {
         let this: Self = glib::Object::builder().build();
@@ -160,7 +160,8 @@ impl Container {
             async move {
                 let runtime = runtime_query
                     .data()
-                    .ok_or_else(|| anyhow::anyhow!("Container runtime not available"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Container runtime not available"))?
+                    .runtime;
                 let usage = runtime.usage(&this.name()).await?;
                 Ok(usage)
             }

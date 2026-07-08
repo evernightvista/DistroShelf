@@ -54,21 +54,46 @@ pub struct Usage {
     pub pids: String,
 }
 
-pub async fn get_container_runtime(
-    command_runner: CommandRunner,
-) -> Option<Rc<dyn ContainerRuntime>> {
+/// A container runtime that was detected as available, together with the
+/// version string obtained during detection. The version probe already runs as
+/// part of detection, so we keep its result here instead of re-fetching it for
+/// display.
+#[derive(Clone)]
+pub struct DetectedRuntime {
+    pub runtime: Rc<dyn ContainerRuntime>,
+    pub version: String,
+}
+
+impl std::fmt::Debug for DetectedRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DetectedRuntime")
+            .field("name", &self.runtime.name())
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+pub async fn get_container_runtime(command_runner: CommandRunner) -> Option<DetectedRuntime> {
     // Prefer Podman when both are available because Podman is rootless by default
     let podman = Podman::new(Rc::new(command_runner.clone()));
-    if let Err(podman_err) = podman.version().await {
-        let docker = Docker::new(Rc::new(command_runner));
-        if let Err(docker_err) = docker.version().await {
-            info!(docker = ?docker_err, podman = ?podman_err, "Container runtime check results");
-            None
-        } else {
-            Some(Rc::new(docker) as Rc<dyn ContainerRuntime>)
+    match podman.version().await {
+        Ok(version) => Some(DetectedRuntime {
+            runtime: Rc::new(podman),
+            version,
+        }),
+        Err(podman_err) => {
+            let docker = Docker::new(Rc::new(command_runner));
+            match docker.version().await {
+                Ok(version) => Some(DetectedRuntime {
+                    runtime: Rc::new(docker),
+                    version,
+                }),
+                Err(docker_err) => {
+                    info!(docker = ?docker_err, podman = ?podman_err, "Container runtime check results");
+                    None
+                }
+            }
         }
-    } else {
-        Some(Rc::new(podman) as Rc<dyn ContainerRuntime>)
     }
 }
 
@@ -151,7 +176,7 @@ mod tests {
         let runtime =
             block_on(get_container_runtime(runner)).expect("a runtime should be detected");
 
-        assert_eq!(runtime.name(), "docker");
+        assert_eq!(runtime.runtime.name(), "docker");
     }
 
     #[test]
@@ -163,6 +188,6 @@ mod tests {
         let runtime =
             block_on(get_container_runtime(runner)).expect("a runtime should be detected");
 
-        assert_eq!(runtime.name(), "podman");
+        assert_eq!(runtime.runtime.name(), "podman");
     }
 }

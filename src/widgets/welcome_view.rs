@@ -99,8 +99,8 @@ mod imp {
             root_store.container_runtime().connect_success(clone!(
                 #[weak]
                 obj,
-                move |runtime| {
-                    obj.imp().update_runtime_status(Some(runtime.as_ref()));
+                move |detected| {
+                    obj.imp().update_runtime_status(Some(detected));
                 }
             ));
             root_store.container_runtime().connect_error(clone!(
@@ -131,7 +131,7 @@ mod imp {
 
         fn update_runtime_status(
             &self,
-            runtime: Option<&dyn crate::backends::container_runtime::ContainerRuntime>,
+            detected: Option<&crate::backends::container_runtime::DetectedRuntime>,
         ) {
             self.runtime_status_spinner.set_visible(false);
 
@@ -140,13 +140,13 @@ mod imp {
                 self.container_runtime_row.remove(&old_icon);
             }
 
-            if let Some(runtime) = runtime {
+            if let Some(detected) = detected {
                 let icon = gtk::Image::from_icon_name("check-plain-symbolic");
                 icon.add_css_class("success");
                 self.container_runtime_row.add_prefix(&icon);
                 self.runtime_status_icon.replace(Some(icon));
 
-                let name = runtime.name();
+                let name = detected.runtime.name();
                 let display_name = match name {
                     "podman" => "Podman",
                     "docker" => "Docker",
@@ -158,17 +158,12 @@ mod imp {
                     gettext("available")
                 ));
 
-                // Try to get version asynchronously
-                let runtime_version_label = self.runtime_version_label.clone();
-                let runtime_clone = self.obj().root_store().container_runtime();
-                glib::MainContext::ref_thread_default().spawn_local(async move {
-                    if let Some(runtime_data) = runtime_clone.data()
-                        && let Ok(version) = runtime_data.version().await
-                    {
-                        runtime_version_label.set_text(&version);
-                        runtime_version_label.set_visible(true);
-                    }
-                });
+                // The version was obtained during detection, so we can display
+                // it synchronously without a second fetch.
+                if !detected.version.is_empty() {
+                    self.runtime_version_label.set_text(&detected.version);
+                    self.runtime_version_label.set_visible(true);
+                }
             } else {
                 let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
                 icon.add_css_class("warning");

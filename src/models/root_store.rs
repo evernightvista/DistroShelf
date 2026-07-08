@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 
 use crate::backends::Distrobox;
 use crate::backends::Status;
-use crate::backends::container_runtime::{ContainerRuntime, get_container_runtime};
+use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime};
 use crate::backends::podman::PodmanEvent;
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
@@ -57,10 +57,8 @@ pub struct Image {
 }
 
 mod imp {
-    use std::rc::Rc;
-
     use crate::{
-        backends::container_runtime::ContainerRuntime, models::ContainerSortKey, query::Query,
+        backends::container_runtime::DetectedRuntime, models::ContainerSortKey, query::Query,
     };
 
     use super::*;
@@ -71,7 +69,7 @@ mod imp {
         pub distrobox: OnceCell<crate::backends::Distrobox>,
         pub terminal_repository: RefCell<TerminalRepository>,
         pub command_runner: OnceCell<CommandRunner>,
-        pub container_runtime: Query<Rc<dyn ContainerRuntime>>,
+        pub container_runtime: Query<DetectedRuntime>,
 
         pub distrobox_version: Query<String>,
         pub images_query: Query<Vec<String>>,
@@ -357,6 +355,7 @@ impl RootStore {
                     .container_runtime()
                     .data()
                     .ok_or_else(|| anyhow::anyhow!("No container runtime available"))?
+                    .runtime
                     .downloaded_images()
                     .await
             }
@@ -376,8 +375,8 @@ impl RootStore {
 
                 // Enrich containers with date info from the container runtime
                 let ids: Vec<&str> = containers.values().map(|c| c.id.as_str()).collect();
-                if let Some(runtime) = runtime_query.data() {
-                    match runtime.inspect_containers(&ids).await {
+                if let Some(detected) = runtime_query.data() {
+                    match detected.runtime.inspect_containers(&ids).await {
                         Ok(inspected) => {
                             for (_name, info) in containers.iter_mut() {
                                 if let Some(inspect_info) = inspected.get(&info.id) {
@@ -550,7 +549,7 @@ impl RootStore {
         self.imp().distrobox_version.clone()
     }
 
-    pub fn container_runtime(&self) -> Query<Rc<dyn ContainerRuntime>> {
+    pub fn container_runtime(&self) -> Query<DetectedRuntime> {
         self.imp().container_runtime.clone()
     }
 
