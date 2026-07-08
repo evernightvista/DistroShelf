@@ -135,6 +135,12 @@ mod imp {
         ) {
             self.runtime_status_spinner.set_visible(false);
 
+            // Reset the version label; it is only shown again once a fresh
+            // version is available below. Without this, a failed re-check would
+            // leave a stale version visible next to the "Not found" warning.
+            self.runtime_version_label.set_text("");
+            self.runtime_version_label.set_visible(false);
+
             // Remove old icon if exists
             if let Some(old_icon) = self.runtime_status_icon.take() {
                 self.container_runtime_row.remove(&old_icon);
@@ -179,6 +185,11 @@ mod imp {
         fn update_distrobox_status(&self, version: Option<&str>) {
             self.distrobox_status_spinner.set_visible(false);
 
+            // Reset the version label; it is only shown again once a fresh
+            // version is available below.
+            self.distrobox_version_label.set_text("");
+            self.distrobox_version_label.set_visible(false);
+
             // Remove old icon if exists
             if let Some(old_icon) = self.distrobox_status_icon.take() {
                 self.distrobox_row.remove(&old_icon);
@@ -220,17 +231,35 @@ mod imp {
         }
 
         fn update_continue_button(&self) {
-            let obj = self.obj();
-            let root_store = obj.root_store();
+            // Enable the continue button only when both requirements are
+            // currently satisfied. See `requirements_met` for why a query being
+            // `is_success()` is not enough on its own.
+            self.continue_btn.set_sensitive(self.requirements_met());
+            // Re-enable refresh button only once both checks have completed
+            // (both spinners hidden), avoiding a premature re-enable after just
+            // the first check finishes.
+            let checks_done = !self.runtime_status_spinner.get_visible()
+                && !self.distrobox_status_spinner.get_visible();
+            if checks_done {
+                self.refresh_btn.set_sensitive(true);
+            }
+        }
 
-            // Enable continue button only if both runtime and distrobox are available
-            let has_runtime = root_store.container_runtime().data().is_some();
-            let has_distrobox = root_store.distrobox_version().data().is_some();
-
-            self.continue_btn
-                .set_sensitive(has_runtime && has_distrobox);
-            // Re-enable refresh button after checks complete
-            self.refresh_btn.set_sensitive(true);
+        /// Whether both requirements are currently satisfied.
+        ///
+        /// A query being `is_success()` only reports the outcome of its last
+        /// *completed* fetch, which is retained across a subsequent refetch. So
+        /// during a refresh a previously-successful query still reports success
+        /// until the new fetch finishes. We therefore also require that no check
+        /// is in flight, so the button reflects the checks currently running.
+        fn requirements_met(&self) -> bool {
+            let root_store = self.obj().root_store();
+            let runtime = root_store.container_runtime();
+            let distrobox = root_store.distrobox_version();
+            runtime.is_success()
+                && distrobox.is_success()
+                && !runtime.is_loading()
+                && !distrobox.is_loading()
         }
 
         fn setup_actions(&self) {
@@ -293,10 +322,9 @@ mod imp {
             let obj = self.obj();
             let root_store = obj.root_store();
 
-            // Only proceed if both requirements are met
-            if root_store.container_runtime().data().is_some()
-                && root_store.distrobox_version().data().is_some()
-            {
+            // Only proceed if both requirements are currently satisfied (latest
+            // check succeeded and no re-check is in flight).
+            if self.requirements_met() {
                 // Load containers and proceed to terminal selection page
                 root_store.load_containers();
                 self.carousel
