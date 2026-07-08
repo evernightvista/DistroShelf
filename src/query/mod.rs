@@ -9,6 +9,27 @@ type QueryFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow:
 type QueryFetcher<T> = Box<dyn Fn() -> QueryFuture<T>>;
 type RefetchStrategy<T> = Rc<dyn Fn(&Query<T>) + 'static>;
 
+/// Outcome of the last *completed* fetch.
+///
+/// This axis is orthogonal to the other two facts a query tracks:
+/// - whether a fetch is currently in flight (`is_loading`), and
+/// - whether cached `data` is present (`data`).
+///
+/// Keeping them separate is deliberate: a query can be `Error` while still
+/// holding stale `data` to display, and it can be loading while its last
+/// completed fetch was `Success` (a background refresh over good data). No
+/// single flat status enum could represent those combinations without losing
+/// information, so callers combine the three axes as needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastFetch {
+    /// No fetch has completed yet.
+    Pending,
+    /// The last completed fetch succeeded.
+    Success,
+    /// The last completed fetch failed. Any cached `data` is retained.
+    Error,
+}
+
 pub struct QueryInner<T> {
     key: String,
     /// The current data (if any successful fetch has occurred)
@@ -390,6 +411,9 @@ where
                 inner.borrow_mut().data = Some(_data.clone());
                 inner.borrow_mut().error = None;
                 query_obj.set_is_loading(false);
+                // Record the outcome of this completed fetch. This is the
+                // "last fetch" axis and is independent of `is_loading` and of
+                // whether `data` is present.
                 query_obj.set_is_success(true);
                 query_obj.set_is_error(false);
                 query_obj.set_error_message(None::<String>);
@@ -414,8 +438,12 @@ where
                 // Keep the previous data, just mark as error
                 inner.borrow_mut().error = Some(rc_error);
                 query_obj.set_is_loading(false);
+                // The outcome axis reflects only the last completed fetch. A
+                // failed fetch is `Error` regardless of any retained `data`;
+                // conflating the two here is what previously let the UI treat a
+                // stale value as if the latest check had succeeded.
                 query_obj.set_is_error(true);
-                query_obj.set_is_success(inner.borrow().data.is_some());
+                query_obj.set_is_success(false);
                 query_obj.set_error_message(Some(error_msg.clone()));
 
                 warn!(resource_key = %key, error = %error_msg, "Resource fetch failed");
@@ -435,10 +463,11 @@ where
             handle.abort();
         }
 
-        // Set loading state, but preserve any previous data
+        // Enter the loading state. The outcome axis (`is_success`/`is_error`)
+        // is intentionally left untouched so a background refetch keeps
+        // reporting the last completed fetch's result (and any retained `data`
+        // stays valid to display) until this fetch completes.
         query_obj.set_is_loading(true);
-        query_obj.set_is_error(false);
-        query_obj.set_is_success(false);
         self.inner.borrow_mut().last_fetched_at = Some(SystemTime::now());
 
         let inner = self.inner.clone();
@@ -538,6 +567,32 @@ where
 
     pub fn is_loading(&self) -> bool {
         self.inner.borrow().query_obj.is_loading()
+    }
+
+    /// Outcome of the last *completed* fetch.
+    ///
+    /// This is one of three orthogonal axes; see [`LastFetch`]. It ignores
+    /// whether a fetch is currently in flight (use [`is_loading`](Self::is_loading))
+    /// and whether cached data is present (use [`data`](Self::data)).
+    pub fn last_fetch(&self) -> LastFetch {
+        let query_obj = { self.inner.borrow().query_obj.clone() };
+        if query_obj.is_error() {
+            LastFetch::Error
+        } else if query_obj.is_success() {
+            LastFetch::Success
+        } else {
+            LastFetch::Pending
+        }
+    }
+
+    /// Convenience: whether the last completed fetch succeeded.
+    pub fn is_success(&self) -> bool {
+        self.last_fetch() == LastFetch::Success
+    }
+
+    /// Convenience: whether the last completed fetch failed.
+    pub fn is_error(&self) -> bool {
+        self.last_fetch() == LastFetch::Error
     }
 
     pub fn data(&self) -> Option<T> {
