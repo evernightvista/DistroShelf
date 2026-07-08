@@ -2,7 +2,7 @@
 <schemalist gettext-domain="distroshelf">
 	<schema id="com.ranfdev.DistroShelf" path="/com/ranfdev/DistroShelf/">
 		<key name="selected-terminal" type="s">
-            <default>'gnome-terminal'</default>
+            <default>''</default>
             <summary>Selected terminal emulator</summary>
             <description>The terminal emulator selected by the user.</description>
         </key>
