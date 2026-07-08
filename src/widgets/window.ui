@@ -257,6 +257,23 @@
     </section>
     <section>
       <item>
+        <attribute name="label" translatable="yes">Sort by Name</attribute>
+        <attribute name="action">win.sort-key</attribute>
+        <attribute name="target">name</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Sort by Creation Date</attribute>
+        <attribute name="action">win.sort-key</attribute>
+        <attribute name="target">creation-date</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Sort by Last Used</attribute>
+        <attribute name="action">win.sort-key</attribute>
+        <attribute name="target">last-used</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
       <attribute name="label" translatable="yes">_Settings</attribute>
       <attribute name="action">win.preferences</attribute>
       </item>

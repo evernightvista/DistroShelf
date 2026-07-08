@@ -24,6 +24,7 @@ use crate::dialogs::{
 };
 use crate::i18n::gettext;
 use crate::models::{Container, DialogParams, DialogType};
+use crate::models::ContainerSortKey;
 use crate::root_store::RootStore;
 use crate::widgets::{IntegratedTerminal, SidebarRow, TasksButton};
 use adw::prelude::*;
@@ -293,6 +294,36 @@ impl DistroShelfWindow {
             }),
         ];
         self.add_action_entries(actions.into_iter().map(|entry| entry.build()));
+
+        let sort_action = gio::SimpleAction::new_stateful(
+            "sort-key",
+            Some(glib::VariantTy::STRING),
+            &ContainerSortKey::Name.to_str().to_variant(),
+        );
+        sort_action.connect_activate(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_action, param| {
+                if let Some(v) = param {
+                    let s: String = v.get().unwrap();
+                    if let Some(key) = ContainerSortKey::from_str(&s) {
+                        this.root_store().set_containers_sort_key(key);
+                    }
+                }
+            }
+        ));
+        self.add_action(&sort_action);
+
+        self.root_store().connect_containers_sort_key_notify(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |store| {
+                let sort_key = store.containers_sort_key();
+                if let Some(action) = this.lookup_action("sort-key") {
+                    action.change_state(&sort_key.to_str().to_variant());
+                }
+            }
+        ));
     }
     fn build_sidebar(&self) {
         let imp = self.imp();

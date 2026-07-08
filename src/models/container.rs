@@ -33,6 +33,10 @@ mod imp {
         pub image: RefCell<String>,
         #[property(get, set, nullable)]
         pub distro: RefCell<Option<KnownDistro>>,
+        #[property(get, set, nullable)]
+        pub creation_date: RefCell<Option<glib::DateTime>>,
+        #[property(get, set, nullable)]
+        pub last_used_date: RefCell<Option<glib::DateTime>>,
         pub apps: Query<TypedListStore<glib::BoxedAnyObject>>,
         pub binaries: Query<TypedListStore<glib::BoxedAnyObject>>,
         // Usage statistics, without polling
@@ -47,6 +51,8 @@ mod imp {
                 status_detail: RefCell::new(String::new()),
                 image: RefCell::new(String::new()),
                 distro: RefCell::new(None),
+                creation_date: RefCell::new(None),
+                last_used_date: RefCell::new(None),
 
                 // Fetching apps often fails when the container is not running and distrobox has to start it,
                 // so we add retries
@@ -178,6 +184,8 @@ impl Container {
         self.set_distro(distro);
         self.set_status_tag(status_tag.to_string());
         self.set_status_detail(status_detail);
+        self.set_creation_date(parse_iso8601(value.created_at.as_deref()));
+        self.set_last_used_date(parse_iso8601(value.last_used_at.as_deref()));
     }
 
     pub fn is_running(&self) -> bool {
@@ -201,4 +209,11 @@ impl Default for Container {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_iso8601(s: Option<&str>) -> Option<glib::DateTime> {
+    s.and_then(|s| {
+        let tz = gtk::glib::TimeZone::utc();
+        glib::DateTime::from_iso8601(s, Some(&tz)).ok()
+    })
 }

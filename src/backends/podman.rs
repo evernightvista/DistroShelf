@@ -10,7 +10,7 @@ use futures::Stream;
 use serde::Deserialize;
 
 use crate::{
-    backends::container_runtime::{ContainerRuntime, Usage},
+    backends::container_runtime::{ContainerInspectInfo, ContainerRuntime, Usage},
     fakers::{Child, Command, CommandRunner, FdMode},
 };
 
@@ -134,6 +134,17 @@ impl ContainerRuntime for Podman {
 
     async fn downloaded_images(&self) -> anyhow::Result<HashSet<String>> {
         self.docker.downloaded_images().await
+    }
+
+    async fn inspect_container(&self, container_id: &str) -> anyhow::Result<ContainerInspectInfo> {
+        self.docker.inspect_container(container_id).await
+    }
+
+    async fn inspect_containers(
+        &self,
+        container_ids: &[&str],
+    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>> {
+        self.docker.inspect_containers(container_ids).await
     }
 }
 

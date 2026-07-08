@@ -268,7 +268,14 @@ impl RootStore {
                 let sort_key = *this.imp().containers_sort_key.borrow();
                 match sort_key {
                     ContainerSortKey::Name => container1.name().cmp(&container2.name()).into(),
-                    _ => unimplemented!("Sorting by {:?} not implemented yet", sort_key),
+                    ContainerSortKey::CreationDate => {
+                        compare_opt_datetimes(container1.creation_date(), container2.creation_date())
+                            .into()
+                    }
+                    ContainerSortKey::LastUsedDate => {
+                        compare_opt_datetimes(container1.last_used_date(), container2.last_used_date())
+                            .into()
+                    }
                 }
             }
         ));
@@ -365,7 +372,31 @@ impl RootStore {
                     let this = this_clone.clone();
                     Rc::new(move || this.load_containers())
                 };
-                let containers = this_clone.distrobox().list().await?;
+                let mut containers = this_clone.distrobox().list().await?;
+
+                // Enrich containers with date info from the container runtime
+                let ids: Vec<&str> = containers.values().map(|c| c.id.as_str()).collect();
+                if let Some(runtime) = runtime_query.data() {
+                    match runtime.inspect_containers(&ids).await {
+                        Ok(inspected) => {
+                            for (_name, info) in containers.iter_mut() {
+                                if let Some(inspect_info) = inspected.get(&info.id) {
+                                    info.created_at =
+                                        inspect_info.created_at.clone();
+                                    info.last_used_at =
+                                        inspect_info.last_used_at().map(|s| s.to_string());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "Failed to inspect containers for date info"
+                            );
+                        }
+                    }
+                }
+
                 let containers: Vec<_> = containers
                     .into_values()
                     .map(|v| {
@@ -391,7 +422,14 @@ impl RootStore {
                 this.containers(),
                 &containers[..],
                 |item| item.name(),
-                &["status-tag", "status-detail", "distro", "image"],
+                &[
+                    "status-tag",
+                    "status-detail",
+                    "distro",
+                    "image",
+                    "creation-date",
+                    "last-used-date",
+                ],
             );
         });
 
@@ -1138,6 +1176,18 @@ impl RootStore {
 impl Default for RootStore {
     fn default() -> Self {
         glib::Object::builder().build()
+    }
+}
+
+fn compare_opt_datetimes(
+    a: Option<glib::DateTime>,
+    b: Option<glib::DateTime>,
+) -> std::cmp::Ordering {
+    match (a.map(|d| d.to_unix()), b.map(|d| d.to_unix())) {
+        (Some(a), Some(b)) => b.cmp(&a), // descending: newest/most-recent first
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 

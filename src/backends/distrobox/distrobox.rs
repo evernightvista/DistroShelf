@@ -153,6 +153,8 @@ pub struct ContainerInfo {
     pub name: String,
     pub status: Status,
     pub image: String,
+    pub created_at: Option<String>,
+    pub last_used_at: Option<String>,
 }
 
 impl ContainerInfo {
@@ -198,6 +200,8 @@ impl FromStr for ContainerInfo {
             name: name.to_string(),
             status: Status::from_str(status),
             image: image.to_string(),
+            created_at: None,
+            last_used_at: None,
         })
     }
 }
@@ -421,6 +425,8 @@ impl DistroboxCommandRunnerResponse {
                 name: name.to_string(),
                 status: Status::Created("2 minutes ago".into()),
                 image: image.to_string(),
+                created_at: None,
+                last_used_at: None,
             })
             .collect()
         })
@@ -1244,6 +1250,8 @@ d24405b14180 | ubuntu               | Created            | ghcr.io/ublue-os/ubun
                         name: "ubuntu".into(),
                         status: Status::Created("".into()),
                         image: "ghcr.io/ublue-os/ubuntu-toolbox:latest".into(),
+                        created_at: None,
+                        last_used_at: None,
                     }
                 )])
             );

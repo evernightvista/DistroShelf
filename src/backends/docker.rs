@@ -1,12 +1,30 @@
-use std::{collections::HashSet, rc::Rc};
+use std::{collections::HashMap, collections::HashSet, rc::Rc};
 
 use async_trait::async_trait;
 
 use crate::{
-    backends::container_runtime::{ContainerRuntime, Usage},
+    backends::container_runtime::{ContainerInspectInfo, ContainerRuntime, Usage},
     fakers::{Command, CommandRunner},
     root_store::Image,
 };
+
+#[derive(serde::Deserialize)]
+struct InspectOutput {
+    #[serde(rename = "Id", default)]
+    id: Option<String>,
+    #[serde(rename = "Created", default)]
+    created: Option<String>,
+    #[serde(rename = "State", default)]
+    state: Option<InspectState>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct InspectState {
+    #[serde(rename = "StartedAt", default)]
+    started_at: Option<String>,
+    #[serde(rename = "FinishedAt", default)]
+    finished_at: Option<String>,
+}
 
 pub(crate) struct Docker {
     pub cmd_runner: Rc<CommandRunner>,
@@ -97,5 +115,67 @@ impl ContainerRuntime for Docker {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("No stats found"))
+    }
+
+    async fn inspect_container(&self, container_id: &str) -> anyhow::Result<ContainerInspectInfo> {
+        let ids = [container_id];
+        self.inspect_containers(&ids)
+            .await?
+            .into_values()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No inspect result for container {container_id}"))
+    }
+
+    async fn inspect_containers(
+        &self,
+        container_ids: &[&str],
+    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>> {
+        if container_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut cmd = Command::new("docker");
+        cmd.arg("inspect");
+        for id in container_ids {
+            cmd.arg(id);
+        }
+
+        let output = self.cmd_runner.output_string(cmd).await?;
+        let inspected: Vec<InspectOutput> = serde_json::from_str(&output)?;
+
+        let mut result = HashMap::new();
+        for entry in inspected {
+            let full_id = entry
+                .id
+                .as_deref()
+                .map(|s| s.trim_start_matches("sha256:"))
+                .unwrap_or("");
+
+            let matched_id = container_ids
+                .iter()
+                .find(|short_id| full_id.starts_with(*short_id))
+                .map(|&s| s.to_string());
+
+            if let Some(id) = matched_id {
+                let info = ContainerInspectInfo {
+                    created_at: entry.created,
+                    started_at: entry.state.as_ref().and_then(|s| {
+                        s.started_at
+                            .as_deref()
+                            .filter(|t| *t != "0001-01-01T00:00:00Z")
+                            .map(|t| t.to_string())
+                    }),
+                    finished_at: entry.state.as_ref().and_then(|s| {
+                        s.finished_at
+                            .as_deref()
+                            .filter(|t| *t != "0001-01-01T00:00:00Z")
+                            .map(|t| t.to_string())
+                    }),
+                };
+                result.insert(id, info);
+            }
+        }
+
+        Ok(result)
     }
 }

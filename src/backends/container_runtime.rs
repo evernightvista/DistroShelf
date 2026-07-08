@@ -1,6 +1,6 @@
 // A container runtime is docker/podman/etc.
 
-use std::{collections::HashSet, rc::Rc};
+use std::{collections::HashMap, collections::HashSet, rc::Rc};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -16,6 +16,26 @@ pub trait ContainerRuntime {
     async fn version(&self) -> anyhow::Result<String>;
     async fn usage(&self, container_id: &str) -> anyhow::Result<Usage>;
     async fn downloaded_images(&self) -> anyhow::Result<HashSet<String>>;
+    async fn inspect_container(&self, container_id: &str) -> anyhow::Result<ContainerInspectInfo>;
+    async fn inspect_containers(
+        &self,
+        container_ids: &[&str],
+    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContainerInspectInfo {
+    pub created_at: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+impl ContainerInspectInfo {
+    pub fn last_used_at(&self) -> Option<&str> {
+        self.finished_at
+            .as_deref()
+            .or(self.started_at.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
