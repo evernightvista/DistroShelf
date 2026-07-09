@@ -35,6 +35,7 @@ use gtk::glib::clone;
 use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::info;
 
 mod imp {
@@ -196,6 +197,16 @@ impl DistroShelfWindow {
             });
         this.build_sidebar();
         this.root_store().load_containers();
+
+        // Refresh data when the window regains focus: the user may have run
+        // distrobox commands externally, or installed podman/distrobox outside
+        // the app. Staleness-gated so rapid focus changes don't hammer backends.
+        this.root_store()
+            .containers_query()
+            .refetch_on_focus(&this, Duration::from_secs(5));
+        this.root_store()
+            .container_runtime()
+            .refetch_on_focus(&this, Duration::from_secs(30));
 
         // Register terminal visibility callback once
         let this_clone = this.clone();

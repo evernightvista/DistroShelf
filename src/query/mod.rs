@@ -30,6 +30,52 @@ pub enum LastFetch {
     Error,
 }
 
+/// RAII guard for a refetch-trigger registration (see [`Query::refetch_on`]).
+///
+/// Its only responsibility is teardown: when dropped — which happens
+/// automatically when the owning [`Query`] is dropped — it severs the wiring
+/// between the event source and the query. Unlike a "subscription" it carries
+/// no data and has no streaming semantics; it exists purely to undo a
+/// registration.
+pub struct RefetchTriggerGuard {
+    unbind: Option<Box<dyn FnOnce()>>,
+}
+
+impl RefetchTriggerGuard {
+    /// General escape hatch: build a guard from anything that can produce a
+    /// "tear this down" closure.
+    pub fn custom(unbind: impl FnOnce() + 'static) -> Self {
+        Self {
+            unbind: Some(Box::new(unbind)),
+        }
+    }
+
+    /// Guard a GObject signal handler. Holds a weak reference to the emitter so
+    /// the guard never keeps it alive; if the object is already gone when the
+    /// guard drops, disconnection is a no-op (GTK already tore the handler down).
+    pub fn signal(obj: &impl IsA<glib::Object>, id: glib::SignalHandlerId) -> Self {
+        let weak = obj.clone().upcast::<glib::Object>().downgrade();
+        Self::custom(move || {
+            if let Some(obj) = weak.upgrade() {
+                obj.disconnect(id);
+            }
+        })
+    }
+
+    /// Guard a GLib main-loop source (timeout/idle) by source id.
+    pub fn source(id: glib::SourceId) -> Self {
+        Self::custom(move || id.remove())
+    }
+}
+
+impl Drop for RefetchTriggerGuard {
+    fn drop(&mut self) {
+        if let Some(unbind) = self.unbind.take() {
+            unbind();
+        }
+    }
+}
+
 pub struct QueryInner<T> {
     key: String,
     /// The current data (if any successful fetch has occurred)
@@ -56,6 +102,11 @@ pub struct QueryInner<T> {
     retry_count: u32,
 
     refetch_strategy: Option<RefetchStrategy<T>>,
+
+    /// Teardown guards for event sources registered via `refetch_on`. Owned by
+    /// the inner state so they disconnect automatically when the last query
+    /// clone is dropped.
+    trigger_guards: Vec<RefetchTriggerGuard>,
 }
 
 impl<T> QueryInner<T> {
@@ -75,6 +126,7 @@ impl<T> QueryInner<T> {
             retry_strategy: None,
             retry_count: 0,
             refetch_strategy: None,
+            trigger_guards: Vec::new(),
         }
     }
 
@@ -210,6 +262,35 @@ impl<T> Drop for Query<T> {
                 debug!(resource_key = %self.inner.borrow().key, "Dropping last reference to Query, aborting active fetch task");
                 handle.abort();
             }
+        }
+    }
+}
+
+/// A clonable handle that, when fired, makes its associated [`Query`] refetch.
+///
+/// Created by [`Query::refetch_on`] and passed into the registration closure so
+/// it can be invoked from inside whatever callback wires up the event source.
+/// It holds a *weak* reference to the query's inner state, so firing a trigger
+/// after the query has been dropped is a safe no-op rather than resurrecting it.
+#[derive(Clone)]
+pub struct RefetchTrigger<T: Clone + 'static> {
+    inner: std::rc::Weak<RefCell<QueryInner<T>>>,
+    max_age: Duration,
+}
+
+impl<T: Clone + 'static> RefetchTrigger<T> {
+    /// Invoke the configured refetch. If the trigger was registered with a
+    /// non-zero `max_age`, the query only refetches when its cached data is
+    /// older than that; a zero `max_age` forces an unconditional refetch.
+    pub fn fire(&self) {
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let query = Query { inner };
+        if self.max_age == Duration::ZERO {
+            query.refetch();
+        } else {
+            query.refetch_if_stale(self.max_age);
         }
     }
 }
@@ -504,6 +585,57 @@ where
     /// Common strategies are `Query::immediate`, `Query::debounce`, and `Query::throttle`.
     pub fn set_refetch_strategy(&self, strategy: impl Fn(&Query<T>) + 'static) {
         self.inner.borrow_mut().refetch_strategy = Some(Rc::new(strategy));
+    }
+
+    /// Register an arbitrary event source that causes this query to refetch.
+    ///
+    /// `connect` receives a [`RefetchTrigger`] to invoke whenever the event
+    /// fires, and returns a [`RefetchTriggerGuard`] describing how to undo the
+    /// registration. The guard is owned by the query and dropped — disconnecting
+    /// the source — when the last clone of the query is dropped.
+    ///
+    /// `max_age` gates the refetch: when non-zero the trigger only refetches if
+    /// the cached data is older than `max_age`
+    /// (see [`refetch_if_stale`](Self::refetch_if_stale)); pass
+    /// [`Duration::ZERO`] to refetch unconditionally on every event.
+    ///
+    /// This is the general primitive behind event-driven refetches; see
+    /// [`refetch_on_focus`](Self::refetch_on_focus) for the common window-focus
+    /// case.
+    pub fn refetch_on(
+        &self,
+        max_age: Duration,
+        connect: impl FnOnce(RefetchTrigger<T>) -> RefetchTriggerGuard,
+    ) {
+        let trigger = RefetchTrigger {
+            inner: Rc::downgrade(&self.inner),
+            max_age,
+        };
+        let guard = connect(trigger);
+        self.inner.borrow_mut().trigger_guards.push(guard);
+    }
+
+    /// Convenience for [`refetch_on`](Self::refetch_on): refetch
+    /// (staleness-gated by `max_age`) whenever `window` becomes the active,
+    /// focused window.
+    ///
+    /// Both directions are weak: if the query is dropped first the focus
+    /// callback becomes a no-op and the guard disconnects the handler; if the
+    /// window is destroyed first GTK drops the handler and the guard's teardown
+    /// is skipped.
+    pub fn refetch_on_focus(&self, window: &impl IsA<gtk::Window>, max_age: Duration) {
+        let key = self.inner.borrow().key.clone();
+        self.refetch_on(max_age, move |trigger| {
+            let win: gtk::Window = window.clone().upcast();
+            let id = win.connect_notify_local(Some("is-active"), move |w, _| {
+                if !w.is_active() {
+                    return;
+                }
+                debug!(resource_key = %key, "Window gained focus, triggering refetch");
+                trigger.fire();
+            });
+            RefetchTriggerGuard::signal(&win, id)
+        });
     }
 
     /// Refetch using the configured strategy (or immediate if none set)
