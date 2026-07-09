@@ -34,8 +34,14 @@ pub struct QueryInner<T> {
     key: String,
     /// The current data (if any successful fetch has occurred)
     pub data: Option<T>,
-    /// Timestamp of the last successful fetch
-    pub last_fetched_at: Option<SystemTime>,
+    /// Timestamp of the last *successful* fetch (when `data` was last updated).
+    pub last_success_at: Option<SystemTime>,
+    /// Timestamp of the last *failed* fetch.
+    pub last_error_at: Option<SystemTime>,
+    /// Timestamp at which the most recent fetch attempt was *started*
+    /// (regardless of outcome, and even if still in flight). This covers both
+    /// manual fetches and retries.
+    pub last_fetch_started_at: Option<SystemTime>,
     /// The last error (if any) - stored as Rc for signal emission
     pub error: Option<Rc<anyhow::Error>>,
     query_fn: Option<QueryFetcher<T>>,
@@ -58,7 +64,9 @@ impl<T> QueryInner<T> {
             key,
             data: None,
             error: None,
-            last_fetched_at: None,
+            last_success_at: None,
+            last_error_at: None,
+            last_fetch_started_at: None,
             query_fn,
             refetch_source_id: None,
             fetch_task_handle: None,
@@ -70,10 +78,13 @@ impl<T> QueryInner<T> {
         }
     }
 
-    /// Check if the data is stale based on a given duration
-    /// Returns true if data has never been fetched or if the duration has elapsed
+    /// Check if the data is stale based on a given duration.
+    ///
+    /// Staleness is measured from the last *successful* fetch, because it
+    /// describes the age of the cached `data`. Returns true if no successful
+    /// fetch has occurred or if the duration has elapsed since then.
     pub fn is_stale(&self, max_age: Duration) -> bool {
-        match self.last_fetched_at {
+        match self.last_success_at {
             None => true,
             Some(fetched_at) => SystemTime::now()
                 .duration_since(fetched_at)
@@ -82,10 +93,10 @@ impl<T> QueryInner<T> {
         }
     }
 
-    /// Get the age of the data since last fetch
-    /// Returns None if data has never been fetched
+    /// Get the age of the data since the last successful fetch.
+    /// Returns None if no successful fetch has occurred.
     pub fn age(&self) -> Option<Duration> {
-        self.last_fetched_at
+        self.last_success_at
             .and_then(|fetched_at| SystemTime::now().duration_since(fetched_at).ok())
     }
 }
@@ -410,6 +421,10 @@ where
             Ok(_data) => {
                 inner.borrow_mut().data = Some(_data.clone());
                 inner.borrow_mut().error = None;
+                // Record the time of this successful fetch. Staleness
+                // (`is_stale`/`age`/`refetch_if_stale`) is measured from here,
+                // since it describes the age of the cached `data`.
+                inner.borrow_mut().last_success_at = Some(SystemTime::now());
                 query_obj.set_is_loading(false);
                 // Record the outcome of this completed fetch. This is the
                 // "last fetch" axis and is independent of `is_loading` and of
@@ -437,6 +452,11 @@ where
                 let error_msg = rc_error.to_string();
                 // Keep the previous data, just mark as error
                 inner.borrow_mut().error = Some(rc_error);
+                // Record when this fetch failed. This is a separate axis from
+                // `last_success_at`: staleness must not be reset by a failure,
+                // but callers still need to know when the last failure happened
+                // (e.g. to back off retries).
+                inner.borrow_mut().last_error_at = Some(SystemTime::now());
                 query_obj.set_is_loading(false);
                 // The outcome axis reflects only the last completed fetch. A
                 // failed fetch is `Error` regardless of any retained `data`;
@@ -468,7 +488,9 @@ where
         // reporting the last completed fetch's result (and any retained `data`
         // stays valid to display) until this fetch completes.
         query_obj.set_is_loading(true);
-        self.inner.borrow_mut().last_fetched_at = Some(SystemTime::now());
+        // Record the start of this attempt (regardless of outcome). This is the
+        // right axis for throttling *attempts* independently of staleness.
+        self.inner.borrow_mut().last_fetch_started_at = Some(SystemTime::now());
 
         let inner = self.inner.clone();
 
@@ -513,6 +535,10 @@ where
             // Spawn the async task on GLib main loop and store the handle
             let handle = glib::spawn_future_local(async move {
                 glib::timeout_future(delay).await;
+                // Record the start of this retry attempt, consistent with
+                // `fetch()`. Done after the delay so it reflects when the
+                // attempt actually begins, not when it was scheduled.
+                inner.borrow_mut().last_fetch_started_at = Some(SystemTime::now());
                 Self::execute_fetch(&inner).await;
             });
 
@@ -611,13 +637,36 @@ where
         self.inner.borrow().age()
     }
 
-    /// Get the timestamp of the last successful fetch
-    pub fn last_fetched_at(&self) -> Option<SystemTime> {
-        self.inner.borrow().last_fetched_at
+    /// Get the timestamp of the last successful fetch (when `data` was last
+    /// updated). This is the axis staleness is measured from.
+    pub fn last_success_at(&self) -> Option<SystemTime> {
+        self.inner.borrow().last_success_at
     }
 
-    /// Refetch only if the data is stale based on the given max age
-    /// Returns true if a refetch was triggered, false if data is still fresh
+    /// Get the timestamp of the last failed fetch.
+    pub fn last_error_at(&self) -> Option<SystemTime> {
+        self.inner.borrow().last_error_at
+    }
+
+    /// Get the timestamp at which the most recent fetch attempt was started
+    /// (regardless of outcome, and even if still in flight). This covers both
+    /// manual fetches and retries.
+    pub fn last_fetch_started_at(&self) -> Option<SystemTime> {
+        self.inner.borrow().last_fetch_started_at
+    }
+
+    /// Refetch only if the cached data is stale based on the given max age.
+    ///
+    /// Staleness is measured from the last *successful* fetch (see
+    /// [`is_stale`](Self::is_stale)). A failure does not by itself force a
+    /// refetch; it simply does not reset the staleness clock. So if the last
+    /// success is older than `max_age`, a subsequent failure will not save the
+    /// data from being considered stale — but if the last success is still
+    /// recent, even a failing attempt leaves the data treated as fresh.
+    /// Rate-limiting of the resulting attempts (e.g. to avoid hammering a
+    /// failing backend) is the job of the refetch strategy, not of this method.
+    ///
+    /// Returns true if a refetch was triggered, false if data is still fresh.
     pub fn refetch_if_stale(&self, max_age: Duration) -> bool {
         let key = { self.inner.borrow().key.clone() };
         if self.is_stale(max_age) {
@@ -644,72 +693,107 @@ where
 mod tests {
     use super::*;
 
-    /// Standalone staleness check logic - mirrors QueryInner::is_stale
-    fn check_is_stale(last_fetched_at: Option<SystemTime>, max_age: Duration) -> bool {
-        match last_fetched_at {
-            None => true,
-            Some(fetched_at) => SystemTime::now()
-                .duration_since(fetched_at)
-                .map(|elapsed| elapsed > max_age)
-                .unwrap_or(true),
-        }
-    }
-
-    /// Standalone age calculation logic - mirrors QueryInner::age
-    fn calculate_age(last_fetched_at: Option<SystemTime>) -> Option<Duration> {
-        last_fetched_at.and_then(|fetched_at| SystemTime::now().duration_since(fetched_at).ok())
+    /// Build a `QueryInner` with `last_success_at` set, for staleness/age tests.
+    fn inner_with_success_at(last_success_at: Option<SystemTime>) -> QueryInner<String> {
+        let mut inner = QueryInner::<String>::new("test".into(), None, None);
+        inner.last_success_at = last_success_at;
+        inner
     }
 
     #[test]
     fn test_is_stale_never_fetched() {
         // Data that was never fetched is always stale
-        assert!(check_is_stale(None, Duration::from_secs(60)));
-        assert!(check_is_stale(None, Duration::from_secs(0)));
+        assert!(inner_with_success_at(None).is_stale(Duration::from_secs(60)));
+        assert!(inner_with_success_at(None).is_stale(Duration::from_secs(0)));
     }
 
     #[test]
     fn test_is_stale_fresh_data() {
-        let fetched_at = Some(SystemTime::now());
+        let inner = inner_with_success_at(Some(SystemTime::now()));
 
         // Data just fetched should not be stale for reasonable max_age
-        assert!(!check_is_stale(fetched_at, Duration::from_secs(60)));
-        assert!(!check_is_stale(fetched_at, Duration::from_secs(1)));
+        assert!(!inner.is_stale(Duration::from_secs(60)));
+        assert!(!inner.is_stale(Duration::from_secs(1)));
     }
 
     #[test]
     fn test_is_stale_old_data() {
-        // Set last_fetched_at to 2 seconds ago
-        let fetched_at = Some(SystemTime::now() - Duration::from_secs(2));
+        // Set last_success_at to 2 seconds ago
+        let inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_secs(2)));
 
         // Data older than max_age is stale
-        assert!(check_is_stale(fetched_at, Duration::from_secs(1)));
+        assert!(inner.is_stale(Duration::from_secs(1)));
         // Data newer than max_age is not stale
-        assert!(!check_is_stale(fetched_at, Duration::from_secs(10)));
+        assert!(!inner.is_stale(Duration::from_secs(10)));
     }
 
     #[test]
     fn test_age_never_fetched() {
         // Data that was never fetched has no age
-        assert!(calculate_age(None).is_none());
+        assert!(inner_with_success_at(None).age().is_none());
     }
 
     #[test]
     fn test_age_just_fetched() {
-        let fetched_at = Some(SystemTime::now());
+        let inner = inner_with_success_at(Some(SystemTime::now()));
 
         // Data just fetched should have very small age
-        let age = calculate_age(fetched_at).expect("Should have age");
+        let age = inner.age().expect("Should have age");
         assert!(age < Duration::from_secs(1));
     }
 
     #[test]
     fn test_age_old_data() {
-        let fetched_at = Some(SystemTime::now() - Duration::from_secs(5));
+        let inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_secs(5)));
 
         // Data fetched 5 seconds ago should have age of approximately 5 seconds
-        let age = calculate_age(fetched_at).expect("Should have age");
+        let age = inner.age().expect("Should have age");
         assert!(age >= Duration::from_secs(4));
         assert!(age < Duration::from_secs(7));
+    }
+
+    #[test]
+    fn test_staleness_tracks_success_not_failure() {
+        // Staleness is measured from the last *successful* fetch. A more recent
+        // failure must NOT make stale data look fresh, otherwise a query that
+        // starts failing would stop being refetched.
+        let mut inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_secs(10)));
+        inner.last_error_at = Some(SystemTime::now()); // just failed
+
+        // Even though we "just" failed, the cached data is 10s old and should be
+        // considered stale for a 1s max age.
+        assert!(inner.is_stale(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_staleness_independent_of_attempt_start() {
+        // Starting (or being in the middle of) a fetch must not reset staleness.
+        // Only a *successful* completion does. Here the last success is old, so
+        // the data is stale regardless of a freshly-started attempt.
+        let mut inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_secs(30)));
+        inner.last_fetch_started_at = Some(SystemTime::now());
+
+        assert!(inner.is_stale(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn test_timing_axes_are_independent() {
+        // The three timing axes answer different questions and can hold
+        // unrelated values simultaneously. `is_stale` and `age` must consult
+        // only `last_success_at`, ignoring `last_error_at` and
+        // `last_fetch_started_at`.
+        let mut inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_secs(20)));
+        inner.last_error_at = Some(SystemTime::now() - Duration::from_secs(2));
+        inner.last_fetch_started_at = Some(SystemTime::now());
+
+        // Age is derived from the success axis only.
+        let age = inner.age().expect("age from success");
+        assert!(age >= Duration::from_secs(19) && age < Duration::from_secs(22));
+
+        // Despite a more recent error and an in-flight attempt, staleness
+        // reflects the 20s-old success, not the other timestamps.
+        assert!(inner.is_stale(Duration::from_secs(5)));
+        assert!(!inner.is_stale(Duration::from_secs(30)));
     }
 
     #[test]
@@ -752,12 +836,12 @@ mod tests {
     #[test]
     fn test_is_stale_boundary() {
         // Test exact boundary condition
-        let fetched_at = Some(SystemTime::now() - Duration::from_millis(1000));
+        let inner = inner_with_success_at(Some(SystemTime::now() - Duration::from_millis(1000)));
 
         // At exactly 1 second, should be stale (elapsed > max_age, not >=)
-        assert!(check_is_stale(fetched_at, Duration::from_millis(999)));
+        assert!(inner.is_stale(Duration::from_millis(999)));
         // At more than elapsed time, should not be stale
-        assert!(!check_is_stale(fetched_at, Duration::from_millis(2000)));
+        assert!(!inner.is_stale(Duration::from_millis(2000)));
     }
 
     #[test]
