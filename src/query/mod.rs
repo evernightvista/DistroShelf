@@ -232,10 +232,8 @@ where
     }
 
     /// Set the timeout duration for this query
-    /// Returns self for method chaining
-    pub fn with_timeout(self, timeout: Duration) -> Self {
+    pub fn set_timeout(&self, timeout: Duration) {
         self.inner.borrow_mut().timeout = Some(timeout);
-        self
     }
 
     /// Strategy: Execute fetch immediately
@@ -342,12 +340,11 @@ where
         }
     }
 
-    pub fn with_retry_strategy(
-        self,
+    pub fn set_retry_strategy(
+        &self,
         retry_strategy: impl Fn(u32) -> Option<Duration> + 'static,
-    ) -> Self {
+    ) {
         self.inner.borrow_mut().retry_strategy = Some(Box::new(retry_strategy));
-        self
     }
 
     pub fn new_with_options<F>(options: QueryOptions<T, F>) -> Self

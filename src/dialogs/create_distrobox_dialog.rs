@@ -710,8 +710,8 @@ impl CreateDistroboxDialog {
                     }
                 }
             ),
-        )
-        .with_timeout(Duration::from_secs(10));
+        );
+        ini_content_query.set_timeout(Duration::from_secs(10));
 
         // Wire ini_content_query success handler
         ini_content_query.connect_success(clone!(
