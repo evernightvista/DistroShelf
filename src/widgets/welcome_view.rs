@@ -86,7 +86,20 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for WelcomeView {}
+    impl WidgetImpl for WelcomeView {
+        fn map(&self) {
+            self.parent_map();
+
+            // Whenever the welcome view becomes visible again, snap back to the
+            // requirements page. The view can be re-shown after the user already
+            // advanced to the terminal page (e.g. the distrobox check later
+            // fails and the root store forces the view back to Welcome); without
+            // this the carousel would still be parked on the terminal page
+            // instead of the requirements the user needs to fix.
+            let first_page = self.carousel.nth_page(0);
+            self.carousel.scroll_to(&first_page, false);
+        }
+    }
     impl BinImpl for WelcomeView {}
 
     impl WelcomeView {
