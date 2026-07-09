@@ -1,6 +1,7 @@
 use crate::backends::supported_terminals;
 use crate::i18n::gettext;
 use crate::models::{DialogType, RootStore};
+use crate::query::LastFetch;
 use crate::widgets::TerminalComboRow;
 
 use adw::prelude::*;
@@ -205,11 +206,23 @@ mod imp {
                 }
             ));
 
-            // Set initial value if already loaded
-            if let Some(version) = obj.root_store().distrobox_version().data() {
-                version_label.set_text(&version);
-            } else {
-                version_label.set_text("—");
+            // Set initial value based on the last-fetch outcome, matching the
+            // success/error handlers above. We cannot use `data()` alone: it is
+            // retained across a failed fetch, so if the query already errored
+            // before this dialog opened, `data()` would show a stale version
+            // instead of "Not available".
+            match obj.root_store().distrobox_version().last_fetch() {
+                LastFetch::Success => {
+                    if let Some(version) = obj.root_store().distrobox_version().data() {
+                        version_label.set_text(&version);
+                    }
+                }
+                LastFetch::Error => {
+                    version_label.set_text(&gettext("Not available"));
+                }
+                LastFetch::Pending => {
+                    version_label.set_text("—");
+                }
             }
 
             distrobox_group.add(&version_row);
