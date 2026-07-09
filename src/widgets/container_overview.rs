@@ -2,12 +2,12 @@ use crate::i18n::gettext;
 use crate::models::Container;
 use crate::widgets::DistroShelfWindow;
 
-use crate::gtk_utils::reaction;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib::clone;
 use gtk::{self, gdk, glib, pango};
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 mod imp {
     use super::*;
@@ -19,6 +19,11 @@ mod imp {
     pub struct ContainerOverview {
         #[property(get, set, construct)]
         pub container: OnceCell<Container>,
+        /// Handlers bound to the container's notify signals. A `SignalGroup`
+        /// owns them and auto-disconnects when this widget is finalized, so
+        /// they don't pile up on the (long-lived) container across overview
+        /// recreations.
+        pub signals: OnceCell<glib::SignalGroup>,
     }
 
     // The central trait for subclassing a GObject
@@ -111,17 +116,38 @@ impl ContainerOverview {
             }
         ));
 
-        reaction! {
-            (container.status_detail(), container.status_tag()),
-            move |(detail, tag): (String, String)| {
-                let text = format!("{tag}: {detail}");
-                status_row.set_subtitle(&text);
+        // Update the status row and fetch usage when the container's status
+        // changes. The usage fetch is edge-triggered — only on the transition
+        // *into* "up" — so reconciling the container list (which re-asserts the
+        // same status) no longer aborts and restarts the usage fetch on every
+        // pass.
+        let on_status_change: Rc<dyn Fn()> = Rc::new({
+            let container = container.clone();
+            let prev_tag: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+            move || {
+                let detail = container.status_detail();
+                let tag = container.status_tag();
+                let prev = prev_tag.replace(Some(tag.clone()));
+                status_row.set_subtitle(&format!("{tag}: {detail}"));
                 stop_btn.set_visible(tag == "up");
-                if tag == "up" {
+                if tag == "up" && prev.as_deref() != Some("up") {
                     usage_query.fetch();
                 }
             }
-        };
+        });
+        on_status_change();
+
+        // Bind the notify handlers through a SignalGroup: it owns the handlers
+        // and auto-disconnects them when this widget is finalized, so they
+        // don't pile up on the (long-lived) container across overview
+        // recreations.
+        let signals = glib::SignalGroup::new::<Container>();
+        for prop in ["status-detail", "status-tag"] {
+            let on_change = on_status_change.clone();
+            signals.connect_notify_local(Some(prop), move |_, _| on_change());
+        }
+        signals.set_target(Some(container));
+        let _ = self.imp().signals.set(signals);
 
         // Quick Actions Group
         let actions_group = adw::PreferencesGroup::new();
