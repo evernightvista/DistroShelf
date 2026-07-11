@@ -131,6 +131,8 @@ App automatically detects Flatpak environment and configures `CommandRunner`:
 ### Desktop File Parsing
 Shell script in `src/backends/distrobox/POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh` finds and encodes desktop files from containers for app export. Uses hex-encoding to avoid shell escaping issues.
 
+## Tools
+
 ### GNOME Documentation Librarian Agent
 Call #tool:runSubagent with `gnome-doc-librarian` to fetch up-to-date documentation for GNOME libraries and components.
 
@@ -154,4 +156,3 @@ where:
 - <description> — a short description of the changes made
 - [optional body] — detailed information about the changes
 - [optional trailer(s)] — additional metadata about the commit
-
