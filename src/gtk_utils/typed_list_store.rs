@@ -274,17 +274,51 @@ impl<T: IsA<glib::Object>> DoubleEndedIterator for TypedListStoreIter<T> {
 
 #[cfg(test)]
 mod tests {
+    use glib::Properties;
+    use glib::subclass::prelude::*;
+    use std::cell::RefCell;
+
+    mod imp {
+        use super::*;
+
+        #[derive(Properties, Default)]
+        #[properties(wrapper_type = super::TestItem)]
+        pub struct TestItem {
+            #[property(get, set)]
+            value: RefCell<String>,
+        }
+
+        #[glib::derived_properties]
+        impl ObjectImpl for TestItem {}
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for TestItem {
+            const NAME: &'static str = "DistroShelfTestItem";
+            type Type = super::TestItem;
+        }
+    }
+
+    glib::wrapper! {
+        pub struct TestItem(ObjectSubclass<imp::TestItem>);
+    }
+
+    impl TestItem {
+        fn new(value: &str) -> Self {
+            glib::Object::builder().property("value", value).build()
+        }
+    }
+
     use super::*;
 
-    #[gtk::test]
+    #[test]
     fn test_typed_list_store() {
-        let store = TypedListStore::<gtk::StringObject>::new();
+        let store = TypedListStore::<TestItem>::new();
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
 
-        let item1 = gtk::StringObject::new("Item 1");
-        let item2 = gtk::StringObject::new("Item 2");
-        let item3 = gtk::StringObject::new("Item 3");
+        let item1 = TestItem::new("Item 1");
+        let item2 = TestItem::new("Item 2");
+        let item3 = TestItem::new("Item 3");
 
         store.append(&item1);
         store.append(&item2);
@@ -294,42 +328,42 @@ mod tests {
         assert!(!store.is_empty());
 
         let first = store.first().unwrap();
-        assert_eq!(first.string(), "Item 1");
+        assert_eq!(first.value(), "Item 1");
 
         let last = store.last().unwrap();
-        assert_eq!(last.string(), "Item 3");
+        assert_eq!(last.value(), "Item 3");
 
         let items: Vec<_> = store.iter().collect();
         assert_eq!(items.len(), 3);
-        assert_eq!(items[1].string(), "Item 2");
+        assert_eq!(items[1].value(), "Item 2");
     }
 
-    #[gtk::test]
+    #[test]
     fn test_retain() {
-        let store = TypedListStore::<gtk::StringObject>::new();
-        store.append(&gtk::StringObject::new("keep1"));
-        store.append(&gtk::StringObject::new("remove"));
-        store.append(&gtk::StringObject::new("keep2"));
+        let store = TypedListStore::<TestItem>::new();
+        store.append(&TestItem::new("keep1"));
+        store.append(&TestItem::new("remove"));
+        store.append(&TestItem::new("keep2"));
 
-        store.retain(|item| item.string().starts_with("keep"));
+        store.retain(|item| item.value().starts_with("keep"));
 
         assert_eq!(store.len(), 2);
-        assert_eq!(store.get(0).unwrap().string(), "keep1");
-        assert_eq!(store.get(1).unwrap().string(), "keep2");
+        assert_eq!(store.get(0).unwrap().value(), "keep1");
+        assert_eq!(store.get(1).unwrap().value(), "keep2");
     }
 
-    #[gtk::test]
+    #[test]
     fn test_find_with() {
-        let store = TypedListStore::<gtk::StringObject>::new();
-        store.append(&gtk::StringObject::new("first"));
-        store.append(&gtk::StringObject::new("second"));
-        store.append(&gtk::StringObject::new("third"));
+        let store = TypedListStore::<TestItem>::new();
+        store.append(&TestItem::new("first"));
+        store.append(&TestItem::new("second"));
+        store.append(&TestItem::new("third"));
 
         let (pos, item) = store
-            .find_with(|item| item.string().contains("sec"))
+            .find_with(|item| item.value().contains("sec"))
             .unwrap();
 
         assert_eq!(pos, 1);
-        assert_eq!(item.string(), "second");
+        assert_eq!(item.value(), "second");
     }
 }
