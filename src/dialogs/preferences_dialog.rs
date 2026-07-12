@@ -22,6 +22,13 @@ mod imp {
         pub terminal_combo_row: RefCell<Option<TerminalComboRow>>,
         pub delete_btn: gtk::Button,
         pub add_terminal_btn: gtk::Button,
+        pub system_row: adw::ActionRow,
+        pub bundled_row: adw::ActionRow,
+        pub system_check: gtk::CheckButton,
+        pub bundled_check: gtk::CheckButton,
+        pub update_btn: gtk::Button,
+        pub bundled_menu_model: gio::Menu,
+        pub bundled_menu_button: gtk::MenuButton,
     }
 
     impl Default for PreferencesDialog {
@@ -31,6 +38,13 @@ mod imp {
                 terminal_combo_row: RefCell::new(None),
                 delete_btn: gtk::Button::new(),
                 add_terminal_btn: gtk::Button::new(),
+                system_row: adw::ActionRow::new(),
+                bundled_row: adw::ActionRow::new(),
+                system_check: gtk::CheckButton::new(),
+                bundled_check: gtk::CheckButton::new(),
+                update_btn: gtk::Button::new(),
+                bundled_menu_model: gio::Menu::new(),
+                bundled_menu_button: gtk::MenuButton::new(),
             }
         }
     }
@@ -135,11 +149,11 @@ mod imp {
 
             page.add(&terminal_group);
 
-            // Distrobox Settings Group
+            // Distrobox Group (general settings)
             let settings = gio::Settings::new("com.ranfdev.DistroShelf");
 
             let distrobox_group = adw::PreferencesGroup::new();
-            distrobox_group.set_title(&gettext("Distrobox Settings"));
+            distrobox_group.set_title(&gettext("Distrobox"));
 
             let no_entry_row = adw::SwitchRow::new();
             no_entry_row.set_title(&gettext("Use --no-entry for new containers"));
@@ -155,99 +169,132 @@ mod imp {
             });
 
             distrobox_group.add(&no_entry_row);
+            page.add(&distrobox_group);
 
-            let distrobox_source_row = adw::ComboRow::new();
-            distrobox_source_row.set_title(&gettext("Distrobox Source"));
-            let model =
-                gtk::StringList::new(&[&gettext("System (host)"), &gettext("Bundled Version")]);
-            distrobox_source_row.set_model(Some(&model));
+            // Distrobox Version Group (source selection + management)
+            let version_group = adw::PreferencesGroup::new();
+            version_group.set_title(&gettext("Distrobox Version"));
 
-            // We need to map string to index and vice versa
-            // 0 -> host, 1 -> bundled
+            // Link the two check buttons into a mutually exclusive radio group.
+            let system_check = self.system_check.clone();
+            let bundled_check = self.bundled_check.clone();
+            bundled_check.set_group(Some(&system_check));
 
-            if settings.string("distrobox-executable") == "bundled" {
-                distrobox_source_row.set_selected(1);
-            } else {
-                distrobox_source_row.set_selected(0);
-            }
+            // ── System row ──────────────────────────────────────────────
+            let system_row = self.system_row.clone();
+            system_row.set_title(&gettext("System Version"));
+            system_row.add_prefix(&system_check);
+            system_row.set_activatable_widget(Some(&system_check));
 
-            distrobox_source_row.connect_selected_notify(move |row| {
-                let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                if row.selected() == 1 {
-                    let _ = settings.set_string("distrobox-executable", "bundled");
-                } else {
-                    let _ = settings.set_string("distrobox-executable", "host");
-                }
-            });
-
-            distrobox_group.add(&distrobox_source_row);
-
-            // Add version row
-            let version_row = adw::ActionRow::new();
-            version_row.set_title(&gettext("Distrobox Version"));
-
-            let version_label = gtk::Label::new(None);
-            version_label.add_css_class("dim-label");
-            version_row.add_suffix(&version_label);
-
-            // Bind to distrobox_version query
-            obj.root_store().distrobox_version().connect_success(clone!(
-                #[weak]
-                version_label,
-                move |version| {
-                    version_label.set_text(version);
-                }
-            ));
-            obj.root_store().distrobox_version().connect_error(clone!(
-                #[weak]
-                version_label,
-                move |_| {
-                    version_label.set_text(&gettext("Not available"));
-                }
-            ));
-
-            // Set initial value based on the last-fetch outcome, matching the
-            // success/error handlers above. We cannot use `data()` alone: it is
-            // retained across a failed fetch, so if the query already errored
-            // before this dialog opened, `data()` would show a stale version
-            // instead of "Not available".
-            match obj.root_store().distrobox_version().last_fetch() {
-                LastFetch::Success => {
-                    if let Some(version) = obj.root_store().distrobox_version().data() {
-                        version_label.set_text(&version);
+            obj.root_store()
+                .system_distrobox_info()
+                .connect_success(clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_| {
+                        this.refresh_system_row();
                     }
-                }
-                LastFetch::Error => {
-                    version_label.set_text(&gettext("Not available"));
-                }
-                LastFetch::Pending => {
-                    version_label.set_text("—");
-                }
-            }
+                ));
+            obj.root_store()
+                .system_distrobox_info()
+                .connect_error(clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_| {
+                        this.refresh_system_row();
+                    }
+                ));
 
-            distrobox_group.add(&version_row);
+            version_group.add(&system_row);
 
-            // Add "Re-download Bundled Version" button
-            let redownload_btn = gtk::Button::new();
-            redownload_btn.set_label(&gettext("Re-download Bundled"));
-            redownload_btn.add_css_class("pill");
-            redownload_btn.set_halign(gtk::Align::Center);
-            redownload_btn.set_margin_top(12);
-            redownload_btn.set_margin_bottom(12);
+            // ── Bundled row ─────────────────────────────────────────────
+            // The radio selects the source; the menu manages the download.
+            let bundled_row = self.bundled_row.clone();
+            bundled_row.set_title(&gettext("Bundled Version"));
+            bundled_row.add_prefix(&bundled_check);
+            bundled_row.set_activatable_widget(Some(&bundled_check));
 
-            redownload_btn.connect_clicked(clone!(
+            // Update button: shown only when a newer bundled version is
+            // available. It's the prominent affordance for upgrading.
+            let update_btn = self.update_btn.clone();
+            update_btn.set_icon_name("software-update-available-symbolic");
+            update_btn.set_tooltip_text(Some(&gettext("Update bundled distrobox")));
+            update_btn.set_valign(gtk::Align::Center);
+            update_btn.add_css_class("suggested-action");
+            update_btn.add_css_class("circular");
+            update_btn.connect_clicked(clone!(
                 #[weak]
                 obj,
                 move |_| {
-                    // Trigger download and open task manager
                     obj.root_store().download_distrobox();
-                    obj.root_store().set_current_dialog(DialogType::TaskManager);
+                    obj.root_store()
+                        .set_current_dialog(DialogType::TaskManager);
+                }
+            ));
+            bundled_row.add_suffix(&update_btn);
+
+            let menu_button = self.bundled_menu_button.clone();
+            menu_button.set_icon_name("view-more-symbolic");
+            menu_button.set_tooltip_text(Some(&gettext("Bundled distrobox actions")));
+            menu_button.set_valign(gtk::Align::Center);
+            menu_button.add_css_class("flat");
+            let popover = gtk::PopoverMenu::from_model(Some(&self.bundled_menu_model));
+            menu_button.set_popover(Some(&popover));
+            bundled_row.add_suffix(&menu_button);
+
+            version_group.add(&bundled_row);
+
+            // Radio → setting
+            system_check.connect_toggled(|cb| {
+                if cb.is_active() {
+                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
+                    let _ = settings.set_string("distrobox-executable", "host");
+                }
+            });
+            bundled_check.connect_toggled(|cb| {
+                if cb.is_active() {
+                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
+                    let _ = settings.set_string("distrobox-executable", "bundled");
+                }
+            });
+
+            // Initial render of both rows + the radio selection
+            obj.refresh_system_row();
+            obj.refresh_bundled_row();
+            obj.sync_selection();
+
+            // Keep the bundled row fresh when update availability changes
+            obj.root_store()
+                .connect_bundled_update_available_notify(clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_| {
+                        this.refresh_bundled_row();
+                    }
+                ));
+
+            // Refresh after a download completes
+            obj.root_store().distrobox_version().connect_success(clone!(
+                #[weak(rename_to = this)]
+                obj,
+                move |_| {
+                    this.refresh_bundled_row();
                 }
             ));
 
-            distrobox_group.add(&redownload_btn);
+            // Keep the radios in sync when the setting changes elsewhere
+            settings.connect_changed(
+                Some("distrobox-executable"),
+                clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_, _| {
+                        this.sync_selection();
+                    }
+                ),
+            );
 
-            page.add(&distrobox_group);
+            page.add(&version_group);
             obj.add(&page);
         }
     }
@@ -257,6 +304,18 @@ mod imp {
         const NAME: &'static str = "PreferencesDialog";
         type Type = super::PreferencesDialog;
         type ParentType = adw::PreferencesDialog;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.install_action(
+                "dialog.download-distrobox",
+                None,
+                |this, _action, _target| {
+                    this.root_store().download_distrobox();
+                    this.root_store()
+                        .set_current_dialog(DialogType::TaskManager);
+                },
+            );
+        }
     }
 
     impl WidgetImpl for PreferencesDialog {}
@@ -281,6 +340,83 @@ impl PreferencesDialog {
             .flatpak_terminals_query()
             .refetch();
         this
+    }
+
+    /// Refresh the system distrobox row subtitle (version · path) from the
+    /// latest query state. The row is greyed out when no version is detected,
+    /// so an unavailable system distrobox can't be selected.
+    fn refresh_system_row(&self) {
+        let imp = self.imp();
+        let query = self.root_store().system_distrobox_info();
+        let (subtitle, has_version) = match query.last_fetch() {
+            LastFetch::Success => match query.data() {
+                Some(info) => match (&info.version, &info.path) {
+                    (Some(v), Some(p)) => (format!("{} · {}", v, p), true),
+                    _ => (gettext("Not available on this system"), false),
+                },
+                None => (gettext("Not available on this system"), false),
+            },
+            LastFetch::Error => (gettext("Not available on this system"), false),
+            LastFetch::Pending => ("—".to_string(), true),
+        };
+        imp.system_row.set_subtitle(&subtitle);
+        imp.system_row.set_sensitive(has_version);
+    }
+
+    /// Refresh the bundled distrobox row: subtitle (version/path/status) and
+    /// the context-aware action menu (download / update / re-download).
+    fn refresh_bundled_row(&self) {
+        let imp = self.imp();
+        let info = crate::distrobox_downloader::get_bundled_info();
+        let is_installed = info.version.is_some();
+        let update_available = self.root_store().bundled_update_available();
+
+        let subtitle = match (&info.version, &info.path) {
+            (Some(v), Some(p)) => {
+                if update_available {
+                    format!("{} · {} · {}", v, p, gettext("Update available"))
+                } else {
+                    format!("{} · {}", v, p)
+                }
+            }
+            _ => crate::gettext_f!(
+                "Not installed · {version} available",
+                "version" => crate::distrobox_downloader::DISTROBOX_VERSION,
+            ),
+        };
+        imp.bundled_row.set_subtitle(&subtitle);
+
+        // The update button is the dedicated upgrade affordance; the menu only
+        // holds download / re-download.
+        let show_update_btn = is_installed && update_available;
+        imp.update_btn.set_visible(show_update_btn);
+        if show_update_btn {
+            imp.update_btn.set_tooltip_text(Some(&format!(
+                "{} ({})",
+                gettext("Update bundled distrobox"),
+                crate::distrobox_downloader::DISTROBOX_VERSION,
+            )));
+        }
+
+        imp.bundled_menu_model.remove_all();
+        if !is_installed {
+            imp.bundled_menu_model
+                .append(Some(&gettext("Download")), Some("dialog.download-distrobox"));
+        } else {
+            imp.bundled_menu_model.append(
+                Some(&gettext("Re-download")),
+                Some("dialog.download-distrobox"),
+            );
+        }
+    }
+
+    /// Sync the radio buttons to the current `distrobox-executable` setting.
+    fn sync_selection(&self) {
+        let settings = gio::Settings::new("com.ranfdev.DistroShelf");
+        let is_bundled = settings.string("distrobox-executable") == "bundled";
+        let imp = self.imp();
+        imp.bundled_check.set_active(is_bundled);
+        imp.system_check.set_active(!is_bundled);
     }
 
     fn update_delete_button_state(&self) {

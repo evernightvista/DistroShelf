@@ -6,10 +6,18 @@ use anyhow::{Context, anyhow};
 use gtk::glib;
 use std::path::PathBuf;
 
-pub const DISTROBOX_VERSION: &str = "1.8.2.4";
+pub const DISTROBOX_VERSION: &str = "1.8.2.5";
 // SHA256 of the tar.gz file from github
 pub const DISTROBOX_SHA256: &str =
-    "83eab6ba893dce56f0523a70ebfcf2a78f7785637a6895255777ef1b72d4eb89";
+    "0c3bc4785ee3be3b89f93abb7cc0a9f60e56989e81319af140a4b60403b18f80";
+
+/// Information about a distrobox binary: its version string and filesystem path.
+/// Used to display both system and bundled distrobox details in the preferences dialog.
+#[derive(Clone, Default)]
+pub struct DistroboxBinaryInfo {
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
 
 pub fn get_bundled_distrobox_path() -> PathBuf {
     let user_data_dir = glib::user_data_dir();
@@ -44,6 +52,26 @@ pub fn is_bundled_update_available() -> bool {
     }
     // An update is available if there's an older version on disk but not the current one
     find_latest_bundled_version().is_some()
+}
+
+/// Extracts the version string from the installed bundled distrobox directory name.
+/// Returns `None` if no bundled version is installed.
+/// Example: `~/.local/share/distroshelf/distrobox-1.8.2.3/distrobox` → `"1.8.2.3"`
+pub fn get_installed_bundled_version() -> Option<String> {
+    let path = resolve_bundled_distrobox_path()?;
+    let parent = path.parent()?;
+    let dir_name = parent.file_name()?.to_str()?;
+    let version = dir_name.strip_prefix("distrobox-")?;
+    Some(version.to_string())
+}
+
+/// Returns [`DistroboxBinaryInfo`] for the bundled distrobox, computed synchronously
+/// from the filesystem. When no bundled version is installed, both fields are `None`.
+pub fn get_bundled_info() -> DistroboxBinaryInfo {
+    DistroboxBinaryInfo {
+        version: get_installed_bundled_version(),
+        path: resolve_bundled_distrobox_path().map(|p| p.to_string_lossy().into_owned()),
+    }
 }
 
 /// Scans the bundled distrobox directory for version subdirectories and returns the path

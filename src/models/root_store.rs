@@ -58,7 +58,8 @@ pub struct Image {
 
 mod imp {
     use crate::{
-        backends::container_runtime::DetectedRuntime, models::ContainerSortKey, query::Query,
+        backends::container_runtime::DetectedRuntime, distrobox_downloader::DistroboxBinaryInfo,
+        models::ContainerSortKey, query::Query,
     };
 
     use super::*;
@@ -72,6 +73,7 @@ mod imp {
         pub container_runtime: Query<DetectedRuntime>,
 
         pub distrobox_version: Query<String>,
+        pub system_distrobox_info: Query<DistroboxBinaryInfo>,
         pub images_query: Query<Vec<String>>,
         pub downloaded_images_query: Query<HashSet<String>>,
         pub containers_query: Query<Vec<Container>>,
@@ -127,6 +129,9 @@ mod imp {
                 distrobox: Default::default(),
                 distrobox_version: Query::new("distrobox_version".into(), || async {
                     Ok(String::new())
+                }),
+                system_distrobox_info: Query::new("system_distrobox_info".into(), || async {
+                    Ok(DistroboxBinaryInfo::default())
                 }),
                 images_query: Query::new("images".into(), || async { Ok(vec![]) }),
                 downloaded_images_query: Query::new("downloaded_images".into(), || async {
@@ -329,6 +334,36 @@ impl RootStore {
         });
 
         let this_clone = this.clone();
+        this.imp().system_distrobox_info.set_fetcher(move || {
+            let command_runner = this_clone.command_runner();
+            async move {
+                let mut version_cmd = Command::new("distrobox");
+                version_cmd.arg("version");
+                let version = command_runner
+                    .output(version_cmd)
+                    .await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        let text = String::from_utf8_lossy(&o.stdout).to_string();
+                        text.split(':').nth(1).map(|s| s.trim().to_string())
+                    });
+
+                let mut path_cmd = Command::new("sh");
+                path_cmd.arg("-c").arg("command -v distrobox");
+                let path = command_runner
+                    .output(path_cmd)
+                    .await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty());
+
+                Ok(crate::distrobox_downloader::DistroboxBinaryInfo { version, path })
+            }
+        });
+
+        let this_clone = this.clone();
         this.imp().images_query.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
@@ -485,6 +520,7 @@ impl RootStore {
 
     pub fn start_background_tasks(&self) {
         self.distrobox_version().refetch();
+        self.system_distrobox_info().refetch();
         self.container_runtime().refetch();
         self.terminal_repository().load_all();
 
@@ -547,6 +583,10 @@ impl RootStore {
 
     pub fn distrobox_version(&self) -> Query<String> {
         self.imp().distrobox_version.clone()
+    }
+
+    pub fn system_distrobox_info(&self) -> Query<crate::distrobox_downloader::DistroboxBinaryInfo> {
+        self.imp().system_distrobox_info.clone()
     }
 
     pub fn container_runtime(&self) -> Query<DetectedRuntime> {
