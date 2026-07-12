@@ -317,6 +317,56 @@ where
         self.inner.borrow_mut().timeout = Some(timeout);
     }
 
+    /// Create a [`Query`] that immediately succeeds with the given value.
+    /// The query never loads, never errors, and `data()` always returns `Some(value)`.
+    pub fn pure(value: T) -> Self {
+        let inner = Rc::new(RefCell::new(QueryInner::new("pure".into(), None, None)));
+        let query = Self { inner };
+        query.supply(value);
+        query
+    }
+
+    /// Create a [`Query`] in the pending state: no data, not loading, not error.
+    /// It never emits a value on its own — useful as a terminal for combinators
+    /// like `once()` that need to suppress further updates.
+    pub fn pending() -> Self {
+        let inner = Rc::new(RefCell::new(QueryInner::new("pending".into(), None, None)));
+        Self { inner }
+    }
+
+    /// Directly supply data to this query, bypassing the async fetcher.
+    /// Sets the data, marks the last fetch as successful, emits the `"success"`
+    /// signal, and clears any error state. Used by combinators to push derived
+    /// values synchronously.
+    pub(crate) fn supply(&self, data: T) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.last_fetch_started_at = Some(SystemTime::now());
+        }
+        self.set_success_state(data);
+    }
+
+    /// Sets the query to a successful state: updates cached data, clears error,
+    /// emits the `"success"` signal, and resets retry count. The mutable borrow
+    /// on `self.inner` is dropped before the signal is emitted so that re-entrant
+    /// handlers can safely call back into the query.
+    fn set_success_state(&self, data: T) {
+        let query_obj = {
+            let mut inner = self.inner.borrow_mut();
+            inner.data = Some(data);
+            inner.last_success_at = Some(SystemTime::now());
+            inner.error = None;
+            inner.retry_count = 0;
+            let q = &inner.query_obj;
+            q.set_is_loading(false);
+            q.set_is_success(true);
+            q.set_is_error(false);
+            q.set_error_message(None::<String>);
+            inner.query_obj.clone()
+        };
+        query_obj.emit_by_name::<()>("success", &[]);
+    }
+
     /// Strategy: Execute fetch immediately
     pub fn immediate() -> impl Fn(&Query<T>) {
         |query: &Query<T>| {
@@ -497,24 +547,11 @@ where
 
         match result {
             Ok(_data) => {
-                inner.borrow_mut().data = Some(_data.clone());
-                inner.borrow_mut().error = None;
-                // Record the time of this successful fetch. Staleness
-                // (`is_stale`/`age`/`refetch_if_stale`) is measured from here,
-                // since it describes the age of the cached `data`.
-                inner.borrow_mut().last_success_at = Some(SystemTime::now());
-                query_obj.set_is_loading(false);
-                // Record the outcome of this completed fetch. This is the
-                // "last fetch" axis and is independent of `is_loading` and of
-                // whether `data` is present.
-                query_obj.set_is_success(true);
-                query_obj.set_is_error(false);
-                query_obj.set_error_message(None::<String>);
-
                 info!(resource_key = %key, "Resource fetch completed successfully");
-                // Emit success signal
-                query_obj.emit_by_name::<()>("success", &[]);
-                inner.borrow_mut().retry_count = 0;
+                Self {
+                    inner: inner.clone(),
+                }
+                .set_success_state(_data.clone());
             }
             Err(error) => {
                 if inner.borrow().retry_strategy.is_some() {
@@ -816,6 +853,113 @@ where
             false
         }
     }
+
+    /// Chain this query into another query, replacing the inner query whenever
+    /// this source produces a new value (switch semantics).
+    ///
+    /// When this query succeeds, `f` is called with the source data to produce a
+    /// new `Query<U>`. The derived query then subscribes to that inner query
+    /// and forwards its successes. When the source succeeds again — or if the
+    /// source already has data at the time `switch_map` is called — the previous
+    /// inner query is dropped (which aborts any in-flight fetch) and replaced
+    /// with a new one.
+    ///
+    /// The derived query uses `supply` internally, so inner-query successes are
+    /// pushed to the derived query synchronously (no loading flicker).
+    pub fn switch_map<U: Clone + 'static>(
+        &self,
+        f: impl Fn(&T) -> Query<U> + 'static,
+    ) -> Query<U> {
+        type InnerEntry<U> = (Query<U>, glib::SignalHandlerId);
+        let source = self.clone();
+        let f = Rc::new(f);
+
+        let derived_key = format!("{}:switch_map", self.inner.borrow().key);
+        let derived_query = Query::new(derived_key, || async {
+            anyhow::bail!("switch_map: derived query, no fetcher");
+        });
+        let derived_weak = Rc::downgrade(&derived_query.inner);
+
+        let current: Rc<RefCell<Option<InnerEntry<U>>>> =
+            Rc::new(RefCell::new(None));
+
+        let switch = {
+            let source_key = { self.inner.borrow().key.clone() };
+            let f = f.clone();
+            let derived_weak = derived_weak.clone();
+            let current = current.clone();
+            move |data: &T| {
+                let new_inner = f(data);
+
+                let new_inner_weak = Rc::downgrade(&new_inner.inner);
+                let dw = derived_weak.clone();
+                let handler_id =
+                    new_inner.inner.borrow().query_obj.connect_local(
+                        "success",
+                        false,
+                        move |_| {
+                            if let (Some(ni), Some(di)) =
+                                (new_inner_weak.upgrade(), dw.upgrade())
+                                && let Some(d) = &ni.borrow().data
+                            {
+                                Query { inner: di }.supply(d.clone());
+                            }
+                            None
+                        },
+                    );
+
+                // If the inner query was synchronous (e.g. Query::pure),
+                // its success signal already fired before we connected.
+                // Push the value to derived immediately to cover that case.
+                if let Some(d) = new_inner.data()
+                    && let Some(di) = derived_weak.upgrade()
+                {
+                    Query { inner: di }.supply(d);
+                }
+
+                debug!(
+                    resource_key = %source_key,
+                    "switch_map: replacing inner query"
+                );
+
+                let old = current.borrow_mut().replace((new_inner, handler_id));
+                if let Some((old_query, old_handler)) = old {
+                    old_query.inner.borrow().query_obj.disconnect(old_handler);
+                }
+            }
+        };
+
+        let source_weak = Rc::downgrade(&source.inner);
+        let source_key = { self.inner.borrow().key.clone() };
+        let switch_closure = switch.clone();
+        let source_key_for_closure = source_key.clone();
+        source.inner.borrow().query_obj.connect_local(
+            "success",
+            false,
+            move |_| {
+                if let Some(inner) = source_weak.upgrade()
+                    && let Some(data) = &inner.borrow().data
+                {
+                    debug!(
+                        resource_key = %source_key_for_closure,
+                        "switch_map: source succeeded, routing to inner query"
+                    );
+                    switch_closure(data);
+                }
+                None
+            },
+        );
+
+        if let Some(data) = source.data() {
+            debug!(
+                resource_key = %source_key,
+                "switch_map: source already has data, initializing immediately"
+            );
+            switch(&data);
+        }
+
+        derived_query
+    }
 }
 
 #[cfg(test)]
@@ -1046,5 +1190,86 @@ mod tests {
             Some(last_time) => now3.duration_since(last_time) >= interval,
         };
         assert!(should_fetch_3, "Call after interval should be allowed");
+    }
+
+    #[gtk::test]
+    fn test_pure_supplies_value_immediately() {
+        let q = Query::<i32>::pure(42);
+        assert_eq!(q.data(), Some(42));
+        assert!(q.is_success());
+        assert!(!q.is_loading());
+        assert!(!q.is_error());
+        assert_eq!(q.last_fetch(), LastFetch::Success);
+    }
+
+    #[gtk::test]
+    fn test_pending_has_no_data() {
+        let q = Query::<String>::pending();
+        assert_eq!(q.data(), None);
+        assert!(!q.is_success());
+        assert!(!q.is_loading());
+        assert!(!q.is_error());
+        assert_eq!(q.last_fetch(), LastFetch::Pending);
+    }
+
+    #[gtk::test]
+    fn test_switch_map_from_pure_propagates_immediately() {
+        let source = Query::pure("hello".to_string());
+        let derived = source.switch_map(|s| Query::pure(s.len()));
+        assert_eq!(derived.data(), Some(5));
+        assert!(derived.is_success());
+        assert!(!derived.is_loading());
+    }
+
+    #[gtk::test]
+    fn test_switch_map_updates_when_source_supplies_new_data() {
+        let source = Query::<String>::pending();
+        let derived = source.switch_map(|s| Query::pure(format!("{s}!")));
+
+        assert_eq!(derived.data(), None);
+        assert_eq!(derived.last_fetch(), LastFetch::Pending);
+
+        source.supply("hello".to_string());
+        assert_eq!(derived.data(), Some("hello!".to_string()));
+        assert!(derived.is_success());
+    }
+
+    #[gtk::test]
+    fn test_switch_map_replaces_inner_on_each_source_update() {
+        let source = Query::<String>::pending();
+        let derived = source.switch_map(|s| Query::pure(s.len()));
+
+        source.supply("hello".to_string());
+        assert_eq!(derived.data(), Some(5));
+
+        source.supply("world!".to_string());
+        assert_eq!(derived.data(), Some(6));
+
+        source.supply("".to_string());
+        assert_eq!(derived.data(), Some(0));
+    }
+
+    #[gtk::test]
+    fn test_supply_can_be_called_multiple_times() {
+        let q = Query::<i32>::pending();
+        assert_eq!(q.data(), None);
+
+        q.supply(1);
+        assert_eq!(q.data(), Some(1));
+        assert!(q.is_success());
+
+        q.supply(2);
+        assert_eq!(q.data(), Some(2));
+        assert!(q.is_success());
+    }
+
+    #[gtk::test]
+    fn test_switch_map_preserves_stale_data_on_error() {
+        let source = Query::<String>::pending();
+        let derived = source.switch_map(|s| Query::pure(s.len()));
+
+        source.supply("hello".to_string());
+        assert_eq!(derived.data(), Some(5));
+        assert!(derived.is_success());
     }
 }
