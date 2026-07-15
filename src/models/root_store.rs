@@ -23,7 +23,9 @@ use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::fakers::{Command, CommandRunner, FdMode};
 use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
+use crate::models::DistroboxExecutable;
 use crate::models::DistroboxTask;
+use crate::models::VersionedExecutable;
 use crate::models::ViewType;
 use crate::models::{Container, ContainerSortKey};
 use crate::models::{DialogParams, DialogType};
@@ -58,8 +60,8 @@ pub struct Image {
 
 mod imp {
     use crate::{
-        backends::container_runtime::DetectedRuntime, distrobox_downloader::DistroboxBinaryInfo,
-        models::ContainerSortKey, query::Query,
+        backends::container_runtime::DetectedRuntime, models::ContainerSortKey,
+        models::VersionedExecutable, query::Query,
     };
 
     use super::*;
@@ -72,8 +74,8 @@ mod imp {
         pub command_runner: OnceCell<CommandRunner>,
         pub container_runtime: Query<DetectedRuntime>,
 
-        pub distrobox_version: Query<String>,
-        pub system_distrobox_info: Query<DistroboxBinaryInfo>,
+        pub distrobox_version: Query<DistroboxExecutable>,
+        pub system_distrobox_info: Query<Option<VersionedExecutable>>,
         pub images_query: Query<Vec<String>>,
         pub downloaded_images_query: Query<HashSet<String>>,
         pub containers_query: Query<Vec<Container>>,
@@ -128,10 +130,13 @@ mod imp {
                 dialog_params: Default::default(),
                 distrobox: Default::default(),
                 distrobox_version: Query::new("distrobox_version".into(), || async {
-                    Ok(String::new())
+                    Ok(DistroboxExecutable::Host(VersionedExecutable {
+                        version: String::new(),
+                        path: String::new(),
+                    }))
                 }),
                 system_distrobox_info: Query::new("system_distrobox_info".into(), || async {
-                    Ok(DistroboxBinaryInfo::default())
+                    Ok(None)
                 }),
                 images_query: Query::new("images".into(), || async { Ok(vec![]) }),
                 downloaded_images_query: Query::new("downloaded_images".into(), || async {
@@ -161,9 +166,8 @@ mod imp {
                 glib::clone!(
                     #[weak]
                     obj,
-                    move |settings, _key| {
-                        let val = settings.string("distrobox-executable");
-                        if val == "bundled" {
+                    move |_settings, _key| {
+                        if obj.is_distrobox_bundled() {
                             if crate::distrobox_downloader::resolve_bundled_distrobox_path()
                                 .is_none()
                             {
@@ -243,17 +247,22 @@ impl RootStore {
 
         // Build a CmdFactory that will be injected into the Distrobox backend. The factory
         // is created here (root_store) so the distrobox module does not depend on `gio::Settings`.
+        // It prefers the cached path from the distrobox_version query when available.
         let this_clone = this.clone();
         let cmd_factory: crate::backends::distrobox::command::CmdFactory = Rc::new(move || {
-            let distrobox_executable_val = this_clone.settings().string("distrobox-executable");
-            let selected_program: String = if distrobox_executable_val == "bundled" {
+            // Prefer cached path from the distrobox_version query
+            if let Some(exe) = this_clone.distrobox_version().data() {
+                return crate::fakers::Command::new(exe.path().to_owned());
+            }
+            // Fallback: resolve directly
+            let selected_program: String = if this_clone.is_distrobox_bundled() {
                 crate::distrobox_downloader::resolve_bundled_distrobox_path()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "distrobox".into())
             } else {
                 "distrobox".into()
             };
-            crate::fakers::Command::new(selected_program.clone())
+            crate::fakers::Command::new(selected_program)
         });
 
         this.imp()
@@ -320,7 +329,32 @@ impl RootStore {
             let this_clone = this_clone.clone();
             async move {
                 let distrobox = this_clone.distrobox();
-                distrobox.version().map_err(|e| e.into()).await
+                let version = distrobox.version().map_err(anyhow::Error::from).await?;
+
+                let is_bundled = this_clone.is_distrobox_bundled();
+                let path: String = if is_bundled {
+                    crate::distrobox_downloader::resolve_bundled_distrobox_path()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .ok_or_else(|| anyhow::anyhow!("Bundled distrobox not found"))?
+                } else {
+                    let mut path_cmd = Command::new("sh");
+                    path_cmd.arg("-c").arg("command -v distrobox");
+                    let output = this_clone
+                        .command_runner()
+                        .output(path_cmd)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to resolve system distrobox path: {}", e))?;
+                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    anyhow::ensure!(!s.is_empty(), "System distrobox not found on PATH");
+                    s
+                };
+
+                let exe = VersionedExecutable { version, path };
+                Ok(if is_bundled {
+                    DistroboxExecutable::Bundled(exe)
+                } else {
+                    DistroboxExecutable::Host(exe)
+                })
             }
         });
         let this_clone = this.clone();
@@ -359,7 +393,10 @@ impl RootStore {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .filter(|s| !s.is_empty());
 
-                Ok(crate::distrobox_downloader::DistroboxBinaryInfo { version, path })
+                Ok(match (version, path) {
+                    (Some(version), Some(path)) => Some(VersionedExecutable { version, path }),
+                    _ => None,
+                })
             }
         });
 
@@ -581,11 +618,11 @@ impl RootStore {
         self.imp().distrobox.get().unwrap()
     }
 
-    pub fn distrobox_version(&self) -> Query<String> {
+    pub fn distrobox_version(&self) -> Query<DistroboxExecutable> {
         self.imp().distrobox_version.clone()
     }
 
-    pub fn system_distrobox_info(&self) -> Query<crate::distrobox_downloader::DistroboxBinaryInfo> {
+    pub fn system_distrobox_info(&self) -> Query<Option<VersionedExecutable>> {
         self.imp().system_distrobox_info.clone()
     }
 
@@ -646,13 +683,24 @@ impl RootStore {
         self.containers_query().refetch();
     }
 
+    /// Whether the current `distrobox-executable` setting selects the bundled distrobox.
+    pub fn is_distrobox_bundled(&self) -> bool {
+        self.settings().string("distrobox-executable") == "bundled"
+    }
+
+    /// Switch the `distrobox-executable` setting between bundled and host.
+    pub fn set_distrobox_bundled(&self, bundled: bool) {
+        self.settings()
+            .set_string("distrobox-executable", if bundled { "bundled" } else { "host" })
+            .expect("Failed to save distrobox-executable setting");
+    }
+
     /// Recalculates and sets the `bundled_update_available` property.
     /// Should be called after distrobox_version query completes, after a download, or when
     /// the distrobox-executable setting changes.
     pub fn update_bundled_update_available(&self) {
-        let settings_val = self.settings().string("distrobox-executable");
         let available =
-            settings_val == "bundled" && crate::distrobox_downloader::is_bundled_update_available();
+            self.is_distrobox_bundled() && crate::distrobox_downloader::is_bundled_update_available();
         self.set_bundled_update_available(available);
     }
 

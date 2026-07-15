@@ -129,8 +129,8 @@ mod imp {
             root_store.distrobox_version().connect_success(clone!(
                 #[weak]
                 obj,
-                move |version| {
-                    obj.imp().update_distrobox_status(Some(version));
+                move |exe| {
+                    obj.imp().update_distrobox_status(Some(exe));
                 }
             ));
             root_store.distrobox_version().connect_error(clone!(
@@ -195,7 +195,7 @@ mod imp {
             self.update_continue_button();
         }
 
-        fn update_distrobox_status(&self, version: Option<&str>) {
+        fn update_distrobox_status(&self, exe: Option<&crate::models::DistroboxExecutable>) {
             self.distrobox_status_spinner.set_visible(false);
 
             // Reset the version label; it is only shown again once a fresh
@@ -208,16 +208,13 @@ mod imp {
                 self.distrobox_row.remove(&old_icon);
             }
 
-            if let Some(version) = version {
+            if let Some(exe) = exe {
                 let icon = gtk::Image::from_icon_name("check-plain-symbolic");
                 icon.add_css_class("success");
                 self.distrobox_row.add_prefix(&icon);
                 self.distrobox_status_icon.replace(Some(icon));
 
-                // Check if using bundled version
-                let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                let distrobox_source = settings.string("distrobox-executable");
-                let source_label = if distrobox_source == "bundled" {
+                let source_label = if exe.is_bundled() {
                     gettext("Bundled version")
                 } else {
                     gettext("System version")
@@ -228,7 +225,7 @@ mod imp {
                     source_label,
                     gettext("available")
                 ));
-                self.distrobox_version_label.set_text(version);
+                self.distrobox_version_label.set_text(exe.version());
                 self.distrobox_version_label.set_visible(true);
             } else {
                 let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
@@ -397,8 +394,7 @@ mod imp {
             obj.root_store().set_current_dialog(DialogType::TaskManager);
 
             // Set the preference for future launches
-            let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-            let _ = settings.set_string("distrobox-executable", "bundled");
+            obj.root_store().set_distrobox_bundled(true);
         }
     }
 }

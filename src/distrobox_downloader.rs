@@ -23,14 +23,6 @@ pub const DISTROBOX_SHA256: &str =
 const BUNDLED_DIR_NAME: &str = "distrobox-bundled";
 const VERSION_FILE: &str = "VERSION";
 
-/// Information about a distrobox binary: its version string and filesystem path.
-/// Used to display both system and bundled distrobox details in the preferences dialog.
-#[derive(Clone, Default)]
-pub struct DistroboxBinaryInfo {
-    pub version: Option<String>,
-    pub path: Option<String>,
-}
-
 pub fn get_bundled_distrobox_path() -> PathBuf {
     get_stable_bundled_dir().join("distrobox")
 }
@@ -56,11 +48,7 @@ fn get_version_file_path() -> PathBuf {
 pub fn resolve_bundled_distrobox_path() -> Option<PathBuf> {
     ensure_stable_bundled_dir();
     let path = get_bundled_distrobox_path();
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Returns true if a bundled distrobox is installed whose version is strictly
@@ -84,13 +72,11 @@ pub fn get_installed_bundled_version() -> Option<String> {
     find_latest_legacy_version_dir().map(|(version, _)| version)
 }
 
-/// Returns [`DistroboxBinaryInfo`] for the bundled distrobox, computed synchronously
-/// from the filesystem. When no bundled version is installed, both fields are `None`.
-pub fn get_bundled_info() -> DistroboxBinaryInfo {
-    DistroboxBinaryInfo {
-        version: get_installed_bundled_version(),
-        path: resolve_bundled_distrobox_path().map(|p| p.to_string_lossy().into_owned()),
-    }
+/// Returns version+path for the bundled distrobox, or `None` when not installed.
+pub fn get_bundled_info() -> Option<crate::models::VersionedExecutable> {
+    let version = get_installed_bundled_version()?;
+    let path = resolve_bundled_distrobox_path()?.to_string_lossy().into_owned();
+    Some(crate::models::VersionedExecutable { version, path })
 }
 
 fn read_installed_version_file() -> Option<String> {
@@ -176,7 +162,9 @@ fn find_latest_legacy_version_dir() -> Option<(String, PathBuf)> {
         .collect();
 
     versions.sort_by(|a, b| a.0.cmp(&b.0));
-    versions.last().map(|(_, version, path)| (version.clone(), path.clone()))
+    versions
+        .last()
+        .map(|(_, version, path)| (version.clone(), path.clone()))
 }
 
 fn parse_semver(v: &str) -> Option<Vec<u32>> {
@@ -280,7 +268,10 @@ pub async fn download_distrobox(
     //    the absolute path baked into containers never changes across updates.
     let extracted_dir = download_dir.join(format!("distrobox-{}", DISTROBOX_VERSION));
     let stable_dir = get_stable_bundled_dir();
-    log(&task, &format!("Installing to stable path {:?}...", stable_dir));
+    log(
+        &task,
+        &format!("Installing to stable path {:?}...", stable_dir),
+    );
     if stable_dir.exists() {
         std::fs::remove_dir_all(&stable_dir)
             .context("Failed to remove previous bundled distrobox")?;

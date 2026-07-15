@@ -350,11 +350,10 @@ impl PreferencesDialog {
         let query = self.root_store().system_distrobox_info();
         let (subtitle, has_version) = match query.last_fetch() {
             LastFetch::Success => match query.data() {
-                Some(info) => match (&info.version, &info.path) {
-                    (Some(v), Some(p)) => (format!("{} · {}", v, p), true),
-                    _ => (gettext("Not available on this system"), false),
-                },
-                None => (gettext("Not available on this system"), false),
+                Some(Some(info)) => {
+                    (format!("{} · {}", info.version, info.path), true)
+                }
+                _ => (gettext("Not available on this system"), false),
             },
             LastFetch::Error => (gettext("Not available on this system"), false),
             LastFetch::Pending => ("—".to_string(), true),
@@ -368,18 +367,23 @@ impl PreferencesDialog {
     fn refresh_bundled_row(&self) {
         let imp = self.imp();
         let info = crate::distrobox_downloader::get_bundled_info();
-        let is_installed = info.version.is_some();
+        let is_installed = info.is_some();
         let update_available = self.root_store().bundled_update_available();
 
-        let subtitle = match (&info.version, &info.path) {
-            (Some(v), Some(p)) => {
+        let subtitle = match &info {
+            Some(info) => {
                 if update_available {
-                    format!("{} · {} · {}", v, p, gettext("Update available"))
+                    format!(
+                        "{} · {} · {}",
+                        info.version,
+                        info.path,
+                        gettext("Update available")
+                    )
                 } else {
-                    format!("{} · {}", v, p)
+                    format!("{} · {}", info.version, info.path)
                 }
             }
-            _ => crate::gettext_f!(
+            None => crate::gettext_f!(
                 "Not installed · {version} available",
                 "version" => crate::distrobox_downloader::DISTROBOX_VERSION,
             ),
