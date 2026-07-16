@@ -391,7 +391,8 @@ impl RootStore {
         this.imp().bundled_distrobox_version.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
-                let Some(path) = crate::distrobox_downloader::resolve_bundled_distrobox_path() else {
+                let command_runner = this_clone.command_runner();
+                let Some(path) = crate::distrobox_downloader::resolve_bundled_distrobox_path(&command_runner).await else {
                     return Ok(None);
                 };
                 let path = path.to_string_lossy().into_owned();
@@ -525,13 +526,18 @@ impl RootStore {
                         let new_source = DistroboxSource::from_setting(&obj.settings());
                         selected_source_clone.refetch();
                         if new_source == DistroboxSource::Bundled {
-                            if crate::distrobox_downloader::resolve_bundled_distrobox_path()
-                                .is_none()
-                            {
-                                obj.download_distrobox();
-                            } else {
-                                obj.bundled_distrobox_version().refetch();
-                            }
+                            let obj_clone = obj.clone();
+                            glib::spawn_future_local(async move {
+                                let runner = obj_clone.command_runner();
+                                if crate::distrobox_downloader::resolve_bundled_distrobox_path(&runner)
+                                    .await
+                                    .is_none()
+                                {
+                                    obj_clone.download_distrobox();
+                                } else {
+                                    obj_clone.bundled_distrobox_version().refetch();
+                                }
+                            });
                         } else {
                             obj.host_distrobox_version().refetch();
                         }
@@ -1824,6 +1830,93 @@ mod tests {
             store.current_view(),
             ViewType::Welcome,
             "should redirect to Welcome when host distrobox is not available"
+        );
+    }
+
+    #[gtk::test]
+    fn test_welcome_view_shown_when_bundled_not_installed() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // Make `test -e <bundled_path>` fail so resolve_bundled_distrobox_path
+        // returns None, simulating a bundled distrobox that hasn't been downloaded.
+        let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
+        let mut test_cmd = Command::new("test");
+        test_cmd.arg("-e").arg(&bundled_path);
+
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new()
+                .cmd_full_with_status(
+                    test_cmd,
+                    ExitStatusExt::from_raw(1),
+                    || Ok(String::new()),
+                )
+                .build(),
+        );
+
+        store.settings()
+            .set_string("distrobox-executable", "bundled")
+            .expect("distrobox-executable key must exist in schema");
+
+        store.start_background_tasks();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.distrobox_version().is_success()
+        });
+
+        assert!(
+            store.distrobox_version().is_success(),
+            "distrobox_version should succeed for bundled source"
+        );
+        assert!(
+            store.distrobox_version().data().is_some_and(|d| d.is_none()),
+            "distrobox_version should be None when bundled is not installed"
+        );
+        assert_eq!(
+            store.current_view(),
+            ViewType::Welcome,
+            "should redirect to Welcome when bundled is selected but not installed"
+        );
+    }
+
+    #[gtk::test]
+    fn test_no_welcome_redirect_when_bundled_is_installed() {
+        // Default NullCommandRunner: `test -e <path>` exits 0 (path exists).
+        // Register a version response for the bundled distrobox binary.
+        let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
+        let mut version_cmd = Command::new(&bundled_path);
+        version_cmd.arg("version");
+
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new()
+                .cmd_full(
+                    version_cmd,
+                    || Ok("distrobox: 1.8.2.5".to_string()),
+                )
+                .build(),
+        );
+
+        store.settings()
+            .set_string("distrobox-executable", "bundled")
+            .expect("distrobox-executable key must exist in schema");
+
+        store.start_background_tasks();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.distrobox_version().is_success()
+        });
+
+        assert!(
+            store.distrobox_version().is_success(),
+            "distrobox_version should succeed"
+        );
+        assert!(
+            store.distrobox_version().data().is_some_and(|d| d.is_some()),
+            "distrobox_version should have data when bundled is installed"
+        );
+        assert_eq!(
+            store.current_view(),
+            ViewType::Main,
+            "should stay on Main when bundled distrobox is installed"
         );
     }
 }

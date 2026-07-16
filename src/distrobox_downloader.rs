@@ -45,10 +45,17 @@ fn get_version_file_path() -> PathBuf {
 /// installs to the stable path on first use.
 ///
 /// Returns `None` only when no bundled distrobox (stable or legacy) is present.
-pub fn resolve_bundled_distrobox_path() -> Option<PathBuf> {
-    ensure_stable_bundled_dir();
+///
+/// All filesystem operations are routed through `command_runner` so that
+/// `NullCommandRunner` can fully stub this function in tests.
+pub async fn resolve_bundled_distrobox_path(command_runner: &CommandRunner) -> Option<PathBuf> {
+    ensure_stable_bundled_dir(command_runner).await;
     let path = get_bundled_distrobox_path();
-    if path.exists() { Some(path) } else { None }
+    if path_exists(command_runner, &path).await {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Returns true if the given installed version is strictly older than the
@@ -61,23 +68,24 @@ pub fn is_bundled_update_available(installed_version: &str) -> bool {
 /// versioned directory does, the legacy directory is *copied* (not moved) into
 /// the stable path so that already-created containers — which may reference the
 /// legacy absolute path — keep working.
-fn ensure_stable_bundled_dir() {
-    if get_bundled_distrobox_path().exists() {
+async fn ensure_stable_bundled_dir(command_runner: &CommandRunner) {
+    let bundled_path = get_bundled_distrobox_path();
+    if path_exists(command_runner, &bundled_path).await {
         return;
     }
-    let Some((version, src_dir)) = find_latest_legacy_version_dir() else {
+    let Some((version, src_dir)) = find_latest_legacy_version_dir(command_runner).await else {
         return;
     };
     let stable_dir = get_stable_bundled_dir();
     // Record the version before copying so that a partial migration
     // (VERSION written but copy failed) is harmless — the stable binary
     // won't exist, so the next call retries the whole migration.
-    if let Err(e) = std::fs::write(get_version_file_path(), &version) {
-        tracing::warn!("Failed to write bundled version marker: {}", e);
+    if write_file(command_runner, get_version_file_path(), &version).await.is_err() {
+        tracing::warn!("Failed to write bundled version marker");
         return;
     }
-    if let Err(e) = copy_dir_recursive(&src_dir, &stable_dir) {
-        tracing::warn!("Failed to migrate bundled distrobox to stable path: {}", e);
+    if copy_dir(command_runner, &src_dir, &stable_dir).await.is_err() {
+        tracing::warn!("Failed to migrate bundled distrobox to stable path");
         return;
     }
     tracing::info!(
@@ -87,50 +95,91 @@ fn ensure_stable_bundled_dir() {
     );
 }
 
-/// Recursively copies a directory tree, replacing the destination if present.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if dst.exists() {
-        std::fs::remove_dir_all(dst)?;
-    }
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
+/// Checks if a path exists by running `test -e` through the command runner.
+async fn path_exists(command_runner: &CommandRunner, path: &Path) -> bool {
+    let mut cmd = Command::new("test");
+    cmd.arg("-e");
+    cmd.arg(path);
+    command_runner
+        .output(cmd)
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Writes content to a file via shell redirect through the command runner.
+async fn write_file(
+    command_runner: &CommandRunner,
+    path: PathBuf,
+    content: &str,
+) -> std::io::Result<()> {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c");
+    cmd.arg(format!("printf '%s' {} > {}", shell_quote(content), path.display()));
+    let output = command_runner.output(cmd).await?;
+    if !output.status.success() {
+        return Err(std::io::Error::other("write_file command failed"));
     }
     Ok(())
+}
+
+/// Recursively copies a directory tree using `cp -r` through the command runner.
+async fn copy_dir(
+    command_runner: &CommandRunner,
+    src: &Path,
+    dst: &Path,
+) -> std::io::Result<()> {
+    let mut cmd = Command::new("cp");
+    cmd.arg("-r");
+    cmd.arg(src);
+    cmd.arg(dst);
+    let output = command_runner.output(cmd).await?;
+    if !output.status.success() {
+        return Err(std::io::Error::other("copy_dir command failed"));
+    }
+    Ok(())
+}
+
+/// Minimal single-quote escaping for shell arguments.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Scans for legacy `distrobox-<VERSION>/` directories and returns the version
 /// string and path of the most recent one. The stable directory
 /// (`distrobox-bundled`) is ignored automatically because `bundled` is not a
 /// numeric version.
-fn find_latest_legacy_version_dir() -> Option<(String, PathBuf)> {
+async fn find_latest_legacy_version_dir(command_runner: &CommandRunner) -> Option<(String, PathBuf)> {
     let parent = get_bundled_distrobox_dir();
-    let entries = std::fs::read_dir(&parent).ok()?;
 
-    let mut versions: Vec<(Vec<u32>, String, PathBuf)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name();
-            let name_str = name.to_str()?;
+    let mut ls_cmd = Command::new("ls");
+    ls_cmd.arg("-1").arg(&parent);
+    let output = command_runner.output(ls_cmd).await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut candidates: Vec<(Vec<u32>, String, PathBuf)> = text
+        .lines()
+        .filter_map(|name_str| {
             let version_str = name_str.strip_prefix("distrobox-")?;
             let parts = parse_semver(version_str)?;
-            if !entry.path().join("distrobox").exists() {
-                return None;
-            }
-            Some((parts, version_str.to_string(), entry.path()))
+            Some((parts, version_str.to_string(), parent.join(name_str)))
         })
         .collect();
 
-    versions.sort_by(|a, b| a.0.cmp(&b.0));
-    versions
+    // Filter to entries that contain a `distrobox` binary
+    let mut valid = Vec::new();
+    for (parts, version, path) in candidates.drain(..) {
+        let distrobox_path = path.join("distrobox");
+        if path_exists(command_runner, &distrobox_path).await {
+            valid.push((parts, version, path));
+        }
+    }
+
+    valid.sort_by(|a, b| a.0.cmp(&b.0));
+    valid
         .last()
         .map(|(_, version, path)| (version.clone(), path.clone()))
 }
