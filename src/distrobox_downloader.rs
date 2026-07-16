@@ -302,6 +302,7 @@ pub async fn download_distrobox(
     log(&task, "Distrobox installed successfully.");
 
     if let Some(root_store) = root_store_weak.upgrade() {
+        root_store.bundled_distrobox_version().refetch();
         root_store.distrobox_version().refetch();
         root_store.update_bundled_update_available();
         root_store.set_current_dialog(crate::models::DialogType::None);

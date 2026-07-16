@@ -76,6 +76,7 @@ mod imp {
         pub container_runtime: Query<DetectedRuntime>,
 
         pub distrobox_version: Query<DistroboxExecutable>,
+        pub bundled_distrobox_version: Query<VersionedExecutable>,
         pub system_distrobox_info: Query<Option<VersionedExecutable>>,
         pub images_query: Query<Vec<String>>,
         pub downloaded_images_query: Query<HashSet<String>>,
@@ -135,6 +136,12 @@ mod imp {
                         version: String::new(),
                         path: String::new(),
                     }))
+                }),
+                bundled_distrobox_version: Query::new("bundled_distrobox_version".into(), || async {
+                    Ok(VersionedExecutable {
+                        version: String::new(),
+                        path: String::new(),
+                    })
                 }),
                 system_distrobox_info: Query::new("system_distrobox_info".into(), || async {
                     Ok(None)
@@ -424,6 +431,24 @@ impl RootStore {
         }
 
         let this_clone = this.clone();
+        this.imp().bundled_distrobox_version.set_fetcher(move || {
+            let this_clone = this_clone.clone();
+            async move {
+                let path = crate::distrobox_downloader::resolve_bundled_distrobox_path()
+                    .ok_or_else(|| anyhow::anyhow!("Bundled distrobox not found"))?
+                    .to_string_lossy().into_owned();
+                let temp_factory: crate::backends::distrobox::command::CmdFactory =
+                    Rc::new({
+                        let path = path.clone();
+                        move || Command::new(path.clone())
+                    });
+                let distrobox = Distrobox::new(this_clone.command_runner(), temp_factory);
+                let version = distrobox.version().map_err(anyhow::Error::from).await?;
+                Ok(VersionedExecutable { version, path })
+            }
+        });
+
+        let this_clone = this.clone();
         this.imp().images_query.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
@@ -580,6 +605,7 @@ impl RootStore {
 
     pub fn start_background_tasks(&self) {
         self.system_distrobox_info().refetch();
+        self.bundled_distrobox_version().refetch();
         if self.distrobox_source() == DistroboxSource::Bundled {
             self.distrobox_version().refetch();
         }
@@ -645,6 +671,10 @@ impl RootStore {
 
     pub fn distrobox_version(&self) -> Query<DistroboxExecutable> {
         self.imp().distrobox_version.clone()
+    }
+
+    pub fn bundled_distrobox_version(&self) -> Query<VersionedExecutable> {
+        self.imp().bundled_distrobox_version.clone()
     }
 
     pub fn system_distrobox_info(&self) -> Query<Option<VersionedExecutable>> {
