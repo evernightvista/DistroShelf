@@ -373,7 +373,7 @@ pub struct InvalidValue {
 ///
 /// These responses simulate the output of various distrobox commands without
 /// actually executing them. This is essential for:
-/// - UI previews in development (via DistroboxStoreTy::NullWorking)
+/// - UI previews in development (via DistroboxStoreTy::NullHostWorking)
 /// - Unit testing without requiring a real distrobox installation
 /// - Flatpak sandbox testing
 #[derive(Clone)]
