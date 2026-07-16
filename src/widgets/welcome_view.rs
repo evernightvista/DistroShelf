@@ -125,8 +125,7 @@ mod imp {
             ));
 
             // Check distrobox version
-            root_store.system_distrobox_info().refetch();
-            root_store.bundled_distrobox_version().refetch();
+            root_store.distrobox_version().refetch();
             root_store.distrobox_version().connect_success(clone!(
                 #[weak]
                 obj,
@@ -325,8 +324,7 @@ mod imp {
 
             // Trigger refetch
             root_store.container_runtime().refetch();
-            root_store.system_distrobox_info().refetch();
-            root_store.bundled_distrobox_version().refetch();
+            root_store.distrobox_version().refetch();
         }
 
         #[template_callback]

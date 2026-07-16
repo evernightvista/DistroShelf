@@ -281,14 +281,16 @@ mod imp {
                     }
                 ));
 
-            // Refresh after a download completes
-            obj.root_store().distrobox_version().connect_success(clone!(
-                #[weak(rename_to = this)]
-                obj,
-                move |_| {
-                    this.refresh_bundled_row();
-                }
-            ));
+            // Refresh after bundled query completes or download finishes
+            obj.root_store()
+                .bundled_distrobox_version()
+                .connect_success(clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_| {
+                        this.refresh_bundled_row();
+                    }
+                ));
 
             // Keep the radios in sync when the setting changes elsewhere
             obj.root_store().settings().connect_changed(
@@ -374,11 +376,11 @@ impl PreferencesDialog {
     /// the context-aware action menu (download / update / re-download).
     fn refresh_bundled_row(&self) {
         let imp = self.imp();
-        let info = crate::distrobox_downloader::get_bundled_info();
-        let is_installed = info.is_some();
+        let query = self.root_store().bundled_distrobox_version();
+        let is_installed = query.is_success() && query.data().is_some();
         let update_available = self.root_store().bundled_update_available();
 
-        let subtitle = match &info {
+        let subtitle = match query.data() {
             Some(info) => {
                 if update_available {
                     format!(

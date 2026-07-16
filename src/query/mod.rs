@@ -958,6 +958,22 @@ where
             switch(&data);
         }
 
+        // When refetching the derived query, cascade the refetch to the
+        // current inner query (which may itself be a switch_map that
+        // cascades further) and to the source query as a fallback, so
+        // that refetch() on a deeply-derived chain eventually reaches a
+        // real async fetcher.
+        {
+            let source_for_refetch = source.clone();
+            let current_for_refetch = current.clone();
+            derived_query.set_refetch_strategy(move |_| {
+                if let Some((inner_query, _)) = current_for_refetch.borrow().as_ref() {
+                    inner_query.refetch();
+                }
+                source_for_refetch.refetch();
+            });
+        }
+
         derived_query
     }
 }
@@ -1271,5 +1287,60 @@ mod tests {
         source.supply("hello".to_string());
         assert_eq!(derived.data(), Some(5));
         assert!(derived.is_success());
+    }
+
+    #[gtk::test]
+    fn test_switch_map_refetch_cascades_to_source() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let fetch_count = Arc::new(AtomicU32::new(0));
+        let fc = fetch_count.clone();
+
+        let source = Query::<i32>::new("test_refetch_source".into(), move || {
+            let fc = fc.clone();
+            async move {
+                fc.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            }
+        });
+
+        let derived = source.switch_map(|n| Query::pure(*n));
+        assert_eq!(derived.data(), None);
+
+        // Initial fetch through source
+        source.supply(7);
+        assert_eq!(derived.data(), Some(7));
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 0);
+
+        // Refetch via derived should cascade to source
+        derived.refetch();
+
+        spin_until(2, || fetch_count.load(Ordering::SeqCst) >= 1);
+
+        assert!(
+            fetch_count.load(Ordering::SeqCst) >= 1,
+            "refetch on derived switch_map should cascade to source: got {}",
+            fetch_count.load(Ordering::SeqCst)
+        );
+    }
+
+    fn spin_until(timeout_secs: u64, mut condition: impl FnMut() -> bool) {
+        use std::time::Instant;
+        let context = glib::MainContext::ref_thread_default();
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+        while Instant::now() < deadline {
+            while context.pending() {
+                context.iteration(false);
+            }
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        while context.pending() {
+            context.iteration(false);
+        }
     }
 }

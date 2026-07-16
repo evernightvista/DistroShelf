@@ -746,9 +746,15 @@ impl RootStore {
     /// Should be called after distrobox_version query completes, after a download, or when
     /// the distrobox-executable setting changes.
     pub fn update_bundled_update_available(&self) {
-        let available =
-            self.is_distrobox_bundled() && crate::distrobox_downloader::is_bundled_update_available();
-        self.set_bundled_update_available(available);
+        if self.distrobox_source() == DistroboxSource::Bundled {
+            if let Some(installed) = self.bundled_distrobox_version().data() {
+                let available =
+                    crate::distrobox_downloader::is_bundled_update_available(&installed.version);
+                self.set_bundled_update_available(available);
+                return;
+            }
+        }
+        self.set_bundled_update_available(false);
     }
 
     pub fn download_distrobox(&self) -> DistroboxTask {

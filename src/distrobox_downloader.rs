@@ -51,42 +51,10 @@ pub fn resolve_bundled_distrobox_path() -> Option<PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
-/// Returns true if a bundled distrobox is installed whose version is strictly
-/// older than the version DistroShelf currently ships (`DISTROBOX_VERSION`).
-pub fn is_bundled_update_available() -> bool {
-    match get_installed_bundled_version() {
-        Some(installed) => version_less_than(&installed, DISTROBOX_VERSION),
-        None => false,
-    }
-}
-
-/// Extracts the version string of the installed bundled distrobox.
-///
-/// Reads the `VERSION` marker inside the stable directory; if that is missing
-/// (e.g. before migration), falls back to scanning legacy `distrobox-<VERSION>/`
-/// directories. Returns `None` when nothing is installed.
-pub fn get_installed_bundled_version() -> Option<String> {
-    if let Some(version) = read_installed_version_file() {
-        return Some(version);
-    }
-    find_latest_legacy_version_dir().map(|(version, _)| version)
-}
-
-/// Returns version+path for the bundled distrobox, or `None` when not installed.
-pub fn get_bundled_info() -> Option<crate::models::VersionedExecutable> {
-    let version = get_installed_bundled_version()?;
-    let path = resolve_bundled_distrobox_path()?.to_string_lossy().into_owned();
-    Some(crate::models::VersionedExecutable { version, path })
-}
-
-fn read_installed_version_file() -> Option<String> {
-    let raw = std::fs::read_to_string(get_version_file_path()).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+/// Returns true if the given installed version is strictly older than the
+/// version DistroShelf currently ships (`DISTROBOX_VERSION`).
+pub fn is_bundled_update_available(installed_version: &str) -> bool {
+    version_less_than(installed_version, DISTROBOX_VERSION)
 }
 
 /// Ensures the stable bundled directory exists. If it doesn't but a legacy
