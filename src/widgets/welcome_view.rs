@@ -217,7 +217,7 @@ mod imp {
                 let source_label = if exe.is_bundled() {
                     gettext("Bundled version")
                 } else {
-                    gettext("System version")
+                    gettext("Host version")
                 };
 
                 self.distrobox_row.set_subtitle(&format!(

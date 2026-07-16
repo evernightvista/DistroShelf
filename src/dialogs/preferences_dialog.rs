@@ -182,7 +182,7 @@ mod imp {
 
             // ── System row ──────────────────────────────────────────────
             let system_row = self.system_row.clone();
-            system_row.set_title(&gettext("System Version"));
+            system_row.set_title(&gettext("Host Version"));
             system_row.add_prefix(&system_check);
             system_row.set_activatable_widget(Some(&system_check));
 
@@ -350,9 +350,9 @@ impl PreferencesDialog {
         this
     }
 
-    /// Refresh the system distrobox row subtitle (version · path) from the
+    /// Refresh the host distrobox row subtitle (version · path) from the
     /// latest query state. The row is greyed out when no version is detected,
-    /// so an unavailable system distrobox can't be selected.
+    /// so an unavailable host distrobox can't be selected.
     fn refresh_system_row(&self) {
         let imp = self.imp();
         let query = self.root_store().system_distrobox_info();

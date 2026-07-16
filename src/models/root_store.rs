@@ -335,13 +335,13 @@ impl RootStore {
                             if let Some(info) = this_clone.system_distrobox_info().data() {
                                 match info {
                                     Some(info) => return Ok(DistroboxExecutable::Host(info)),
-                                    None => anyhow::bail!("System distrobox not installed"),
+                                    None => anyhow::bail!("Host distrobox not installed"),
                                 }
                             }
                             if this_clone.system_distrobox_info().is_error()
                                 && !this_clone.system_distrobox_info().is_loading()
                             {
-                                anyhow::bail!("Failed to fetch system distrobox info");
+                                anyhow::bail!("Failed to fetch host distrobox info");
                             }
                             glib::timeout_future(Duration::from_millis(100)).await;
                         }
