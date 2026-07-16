@@ -248,22 +248,16 @@ impl RootStore {
 
         // Build a CmdFactory that will be injected into the Distrobox backend. The factory
         // is created here (root_store) so the distrobox module does not depend on `gio::Settings`.
-        // It prefers the cached path from the distrobox_version query when available.
+        // The distrobox_version query is the single source of truth for the resolved path.
+        // When it is not yet available (startup, setting-change transition), fall back to a
+        // bare "distrobox" and rely on PATH resolution.
         let this_clone = this.clone();
         let cmd_factory: crate::backends::distrobox::command::CmdFactory = Rc::new(move || {
-            // Prefer cached path from the distrobox_version query
             if let Some(exe) = this_clone.distrobox_version().data() {
                 return crate::fakers::Command::new(exe.path().to_owned());
             }
-            // Fallback: resolve directly
-            let selected_program: String = if this_clone.distrobox_source() == DistroboxSource::Bundled {
-                crate::distrobox_downloader::resolve_bundled_distrobox_path()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "distrobox".into())
-            } else {
-                "distrobox".into()
-            };
-            crate::fakers::Command::new(selected_program)
+            warn!("distrobox_version not ready; falling back to bare 'distrobox'");
+            crate::fakers::Command::new("distrobox")
         });
 
         this.imp()
