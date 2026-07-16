@@ -351,6 +351,13 @@ mod imp {
                 glib::MainContext::ref_thread_default().spawn_local(async move {
                     match obj.root_store().validate_terminal().await {
                         Ok(_) => {
+                            debug_assert!(
+                                obj.root_store()
+                                    .distrobox_version()
+                                    .data()
+                                    .is_some_and(|d| d.is_some()),
+                                "cannot enter Main without a resolved distrobox executable"
+                            );
                             obj.root_store().set_current_view(ViewType::Main);
                         }
                         Err(err) => {

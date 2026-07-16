@@ -187,7 +187,10 @@ pub struct NullCommandRunnerBuilder {
 
 impl NullCommandRunnerBuilder {
     pub fn new() -> Self {
-        Default::default()
+        Self {
+            responses: ResponseMap::new(),
+            fallback_exit_status: ExitStatus::from_raw(0),
+        }
     }
     #[allow(dead_code)]
     pub fn cmd<T: AsRef<str>>(&mut self, args: &[T], out: T) -> &mut Self {

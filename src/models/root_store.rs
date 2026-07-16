@@ -233,6 +233,7 @@ impl RootStore {
         let this_clone = this.clone();
         let cmd_factory: crate::backends::distrobox::command::CmdFactory = Rc::new(move || {
             if let Some(Some(exe)) = this_clone.distrobox_version().data() {
+                debug_assert!(!exe.path().is_empty(), "resolved distrobox path must not be empty");
                 return crate::fakers::Command::new(exe.path().to_owned());
             }
             warn!("distrobox_version not ready; falling back to bare 'distrobox'");
@@ -345,6 +346,21 @@ impl RootStore {
         this.distrobox_version().connect_success(move |exe| {
             if exe.is_none() {
                 this_clone.set_current_view(ViewType::Welcome);
+                debug_assert_eq!(
+                    this_clone.current_view(),
+                    ViewType::Welcome,
+                    "view must be Welcome after distrobox resolves to None"
+                );
+            } else {
+                let source = this_clone.distrobox_source();
+                debug_assert!(
+                    match (&exe, source) {
+                        (Some(DistroboxExecutable::Host(_)), DistroboxSource::Host) => true,
+                        (Some(DistroboxExecutable::Bundled(_)), DistroboxSource::Bundled) => true,
+                        _ => false,
+                    },
+                    "distrobox_version variant must match selected_source"
+                );
             }
             this_clone.update_bundled_update_available();
         });
