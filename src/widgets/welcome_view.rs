@@ -130,7 +130,7 @@ mod imp {
                 #[weak]
                 obj,
                 move |exe| {
-                    obj.imp().update_distrobox_status(Some(exe));
+                    obj.imp().update_distrobox_status(exe.as_ref());
                 }
             ));
             root_store.distrobox_version().connect_error(clone!(
@@ -261,13 +261,16 @@ mod imp {
         /// *completed* fetch, which is retained across a subsequent refetch. So
         /// during a refresh a previously-successful query still reports success
         /// until the new fetch finishes. We therefore also require that no check
-        /// is in flight, so the button reflects the checks currently running.
+        /// is in flight. For distrobox, we additionally check that the
+        /// executable is actually available (the query can succeed with None
+        /// when distrobox is not installed).
         fn requirements_met(&self) -> bool {
             let root_store = self.obj().root_store();
             let runtime = root_store.container_runtime();
             let distrobox = root_store.distrobox_version();
             runtime.is_success()
                 && distrobox.is_success()
+                && distrobox.data().is_some_and(|d| d.is_some())
                 && !runtime.is_loading()
                 && !distrobox.is_loading()
         }

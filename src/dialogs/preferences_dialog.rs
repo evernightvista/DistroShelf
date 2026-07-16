@@ -377,11 +377,11 @@ impl PreferencesDialog {
     fn refresh_bundled_row(&self) {
         let imp = self.imp();
         let query = self.root_store().bundled_distrobox_version();
-        let is_installed = query.is_success() && query.data().is_some();
+        let is_installed = matches!(query.data(), Some(Some(_)));
         let update_available = self.root_store().bundled_update_available();
 
         let subtitle = match query.data() {
-            Some(info) => {
+            Some(Some(info)) => {
                 if update_available {
                     format!(
                         "{} · {} · {}",
@@ -393,7 +393,7 @@ impl PreferencesDialog {
                     format!("{} · {}", info.version, info.path)
                 }
             }
-            None => crate::gettext_f!(
+            _ => crate::gettext_f!(
                 "Not installed · {version} available",
                 "version" => crate::distrobox_downloader::DISTROBOX_VERSION,
             ),

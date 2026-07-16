@@ -75,8 +75,8 @@ mod imp {
         pub command_runner: OnceCell<CommandRunner>,
         pub container_runtime: Query<DetectedRuntime>,
 
-        pub distrobox_version: RefCell<Query<DistroboxExecutable>>,
-        pub bundled_distrobox_version: Query<VersionedExecutable>,
+        pub distrobox_version: RefCell<Query<Option<DistroboxExecutable>>>,
+        pub bundled_distrobox_version: Query<Option<VersionedExecutable>>,
         pub host_distrobox_version: Query<Option<VersionedExecutable>>,
         pub images_query: Query<Vec<String>>,
         pub downloaded_images_query: Query<HashSet<String>>,
@@ -132,16 +132,10 @@ mod imp {
                 dialog_params: Default::default(),
                 distrobox: Default::default(),
                 distrobox_version: RefCell::new(Query::new("distrobox_version".into(), || async {
-                    Ok(DistroboxExecutable::Host(VersionedExecutable {
-                        version: String::new(),
-                        path: String::new(),
-                    }))
+                    Ok(None)
                 })),
                 bundled_distrobox_version: Query::new("bundled_distrobox_version".into(), || async {
-                    Ok(VersionedExecutable {
-                        version: String::new(),
-                        path: String::new(),
-                    })
+                    Ok(None)
                 }),
                 host_distrobox_version: Query::new("host_distrobox_version".into(), || async {
                     Ok(None)
@@ -238,7 +232,7 @@ impl RootStore {
         // bare "distrobox" and rely on PATH resolution.
         let this_clone = this.clone();
         let cmd_factory: crate::backends::distrobox::command::CmdFactory = Rc::new(move || {
-            if let Some(exe) = this_clone.distrobox_version().data() {
+            if let Some(Some(exe)) = this_clone.distrobox_version().data() {
                 return crate::fakers::Command::new(exe.path().to_owned());
             }
             warn!("distrobox_version not ready; falling back to bare 'distrobox'");
@@ -314,25 +308,24 @@ impl RootStore {
                 async move { Ok(DistroboxSource::from_setting(&this.settings())) }
             });
 
-        // Host derivation: host_distrobox_version -> DistroboxExecutable::Host.
-        // When host_distrobox_version has no data (not installed), the derived
-        // query is put into error state.
+        // Host derivation: host_distrobox_version -> Option<DistroboxExecutable>.
+        // When host_distrobox_version has None (not installed), the derived
+        // query produces None.
         let host_version = this.host_distrobox_version().switch_map(|info| {
             match info {
-                Some(exe) => Query::pure(DistroboxExecutable::Host(exe.clone())),
-                None => {
-                    let q = Query::new("host_missing".into(), || async {
-                        anyhow::bail!("Host distrobox not installed")
-                    });
-                    q.refetch();
-                    q
-                }
+                Some(exe) => Query::pure(Some(DistroboxExecutable::Host(exe.clone()))),
+                None => Query::pure(None),
             }
         });
 
-        // Bundled derivation: bundled_distrobox_version -> DistroboxExecutable::Bundled.
+        // Bundled derivation: bundled_distrobox_version -> Option<DistroboxExecutable>.
+        // When bundled_distrobox_version has None (not installed), the derived
+        // query produces None.
         let bundled_version = this.bundled_distrobox_version().switch_map(|info| {
-            Query::pure(DistroboxExecutable::Bundled(info.clone()))
+            match info {
+                Some(exe) => Query::pure(Some(DistroboxExecutable::Bundled(exe.clone()))),
+                None => Query::pure(None),
+            }
         });
 
         // distrobox_version derived from selected_source via switch_map.
@@ -349,12 +342,15 @@ impl RootStore {
 
         this.imp().distrobox_version.replace(distrobox_version);
         let this_clone = this.clone();
-        this.distrobox_version().connect_error(move |_error| {
-            this_clone.set_current_view(ViewType::Welcome);
+        this.distrobox_version().connect_success(move |exe| {
+            if exe.is_none() {
+                this_clone.set_current_view(ViewType::Welcome);
+            }
             this_clone.update_bundled_update_available();
         });
         let this_clone = this.clone();
-        this.distrobox_version().connect_success(move |_version| {
+        this.distrobox_version().connect_error(move |_error| {
+            this_clone.set_current_view(ViewType::Welcome);
             this_clone.update_bundled_update_available();
         });
 
@@ -395,9 +391,10 @@ impl RootStore {
         this.imp().bundled_distrobox_version.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
-                let path = crate::distrobox_downloader::resolve_bundled_distrobox_path()
-                    .ok_or_else(|| anyhow::anyhow!("Bundled distrobox not found"))?
-                    .to_string_lossy().into_owned();
+                let Some(path) = crate::distrobox_downloader::resolve_bundled_distrobox_path() else {
+                    return Ok(None);
+                };
+                let path = path.to_string_lossy().into_owned();
                 let temp_factory: crate::backends::distrobox::command::CmdFactory =
                     Rc::new({
                         let path = path.clone();
@@ -405,7 +402,7 @@ impl RootStore {
                     });
                 let distrobox = Distrobox::new(this_clone.command_runner(), temp_factory);
                 let version = distrobox.version().map_err(anyhow::Error::from).await?;
-                Ok(VersionedExecutable { version, path })
+                Ok(Some(VersionedExecutable { version, path }))
             }
         });
 
@@ -659,11 +656,11 @@ impl RootStore {
         self.imp().distrobox.get().unwrap()
     }
 
-    pub fn distrobox_version(&self) -> Query<DistroboxExecutable> {
+    pub fn distrobox_version(&self) -> Query<Option<DistroboxExecutable>> {
         self.imp().distrobox_version.borrow().clone()
     }
 
-    pub fn bundled_distrobox_version(&self) -> Query<VersionedExecutable> {
+    pub fn bundled_distrobox_version(&self) -> Query<Option<VersionedExecutable>> {
         self.imp().bundled_distrobox_version.clone()
     }
 
@@ -749,7 +746,7 @@ impl RootStore {
     /// the distrobox-executable setting changes.
     pub fn update_bundled_update_available(&self) {
         if self.distrobox_source() == DistroboxSource::Bundled {
-            if let Some(installed) = self.bundled_distrobox_version().data() {
+            if let Some(Some(installed)) = self.bundled_distrobox_version().data() {
                 let available =
                     crate::distrobox_downloader::is_bundled_update_available(&installed.version);
                 self.set_bundled_update_available(available);
