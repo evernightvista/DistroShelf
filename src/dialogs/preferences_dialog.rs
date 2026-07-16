@@ -1,6 +1,6 @@
 use crate::backends::supported_terminals;
 use crate::i18n::gettext;
-use crate::models::{DialogType, RootStore};
+use crate::models::{DialogType, DistroboxSource, RootStore};
 use crate::query::LastFetch;
 use crate::widgets::TerminalComboRow;
 
@@ -22,9 +22,9 @@ mod imp {
         pub terminal_combo_row: RefCell<Option<TerminalComboRow>>,
         pub delete_btn: gtk::Button,
         pub add_terminal_btn: gtk::Button,
-        pub system_row: adw::ActionRow,
+        pub host_row: adw::ActionRow,
         pub bundled_row: adw::ActionRow,
-        pub system_check: gtk::CheckButton,
+        pub host_check: gtk::CheckButton,
         pub bundled_check: gtk::CheckButton,
         pub update_btn: gtk::Button,
         pub bundled_menu_model: gio::Menu,
@@ -38,9 +38,9 @@ mod imp {
                 terminal_combo_row: RefCell::new(None),
                 delete_btn: gtk::Button::new(),
                 add_terminal_btn: gtk::Button::new(),
-                system_row: adw::ActionRow::new(),
+                host_row: adw::ActionRow::new(),
                 bundled_row: adw::ActionRow::new(),
-                system_check: gtk::CheckButton::new(),
+                host_check: gtk::CheckButton::new(),
                 bundled_check: gtk::CheckButton::new(),
                 update_btn: gtk::Button::new(),
                 bundled_menu_model: gio::Menu::new(),
@@ -176,36 +176,36 @@ mod imp {
             version_group.set_title(&gettext("Distrobox Version"));
 
             // Link the two check buttons into a mutually exclusive radio group.
-            let system_check = self.system_check.clone();
+            let host_check = self.host_check.clone();
             let bundled_check = self.bundled_check.clone();
-            bundled_check.set_group(Some(&system_check));
+            bundled_check.set_group(Some(&host_check));
 
             // ── System row ──────────────────────────────────────────────
-            let system_row = self.system_row.clone();
-            system_row.set_title(&gettext("System Version"));
-            system_row.add_prefix(&system_check);
-            system_row.set_activatable_widget(Some(&system_check));
+            let host_row = self.host_row.clone();
+            host_row.set_title(&gettext("Host Version"));
+            host_row.add_prefix(&host_check);
+            host_row.set_activatable_widget(Some(&host_check));
 
             obj.root_store()
-                .system_distrobox_info()
+                .host_distrobox_version()
                 .connect_success(clone!(
                     #[weak(rename_to = this)]
                     obj,
                     move |_| {
-                        this.refresh_system_row();
+                        this.refresh_host_row();
                     }
                 ));
             obj.root_store()
-                .system_distrobox_info()
+                .host_distrobox_version()
                 .connect_error(clone!(
                     #[weak(rename_to = this)]
                     obj,
                     move |_| {
-                        this.refresh_system_row();
+                        this.refresh_host_row();
                     }
                 ));
 
-            version_group.add(&system_row);
+            version_group.add(&host_row);
 
             // ── Bundled row ─────────────────────────────────────────────
             // The radio selects the source; the menu manages the download.
@@ -245,21 +245,29 @@ mod imp {
             version_group.add(&bundled_row);
 
             // Radio → setting
-            system_check.connect_toggled(|cb| {
-                if cb.is_active() {
-                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                    let _ = settings.set_string("distrobox-executable", "host");
+            host_check.connect_toggled(clone!(
+                #[weak(rename_to = this)]
+                obj,
+                move |cb| {
+                    if cb.is_active() {
+                        this.root_store()
+                            .set_distrobox_source(DistroboxSource::Host);
+                    }
                 }
-            });
-            bundled_check.connect_toggled(|cb| {
-                if cb.is_active() {
-                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                    let _ = settings.set_string("distrobox-executable", "bundled");
+            ));
+            bundled_check.connect_toggled(clone!(
+                #[weak(rename_to = this)]
+                obj,
+                move |cb| {
+                    if cb.is_active() {
+                        this.root_store()
+                            .set_distrobox_source(DistroboxSource::Bundled);
+                    }
                 }
-            });
+            ));
 
             // Initial render of both rows + the radio selection
-            obj.refresh_system_row();
+            obj.refresh_host_row();
             obj.refresh_bundled_row();
             obj.sync_selection();
 
@@ -273,17 +281,19 @@ mod imp {
                     }
                 ));
 
-            // Refresh after a download completes
-            obj.root_store().distrobox_version().connect_success(clone!(
-                #[weak(rename_to = this)]
-                obj,
-                move |_| {
-                    this.refresh_bundled_row();
-                }
-            ));
+            // Refresh after bundled query completes or download finishes
+            obj.root_store()
+                .bundled_distrobox_version()
+                .connect_success(clone!(
+                    #[weak(rename_to = this)]
+                    obj,
+                    move |_| {
+                        this.refresh_bundled_row();
+                    }
+                ));
 
             // Keep the radios in sync when the setting changes elsewhere
-            settings.connect_changed(
+            obj.root_store().settings().connect_changed(
                 Some("distrobox-executable"),
                 clone!(
                     #[weak(rename_to = this)]
@@ -342,44 +352,48 @@ impl PreferencesDialog {
         this
     }
 
-    /// Refresh the system distrobox row subtitle (version · path) from the
+    /// Refresh the host distrobox row subtitle (version · path) from the
     /// latest query state. The row is greyed out when no version is detected,
-    /// so an unavailable system distrobox can't be selected.
-    fn refresh_system_row(&self) {
+    /// so an unavailable host distrobox can't be selected.
+    fn refresh_host_row(&self) {
         let imp = self.imp();
-        let query = self.root_store().system_distrobox_info();
+        let query = self.root_store().host_distrobox_version();
         let (subtitle, has_version) = match query.last_fetch() {
             LastFetch::Success => match query.data() {
-                Some(info) => match (&info.version, &info.path) {
-                    (Some(v), Some(p)) => (format!("{} · {}", v, p), true),
-                    _ => (gettext("Not available on this system"), false),
-                },
-                None => (gettext("Not available on this system"), false),
+                Some(Some(info)) => {
+                    (format!("{} · {}", info.version, info.path), true)
+                }
+                _ => (gettext("Not available on this system"), false),
             },
             LastFetch::Error => (gettext("Not available on this system"), false),
             LastFetch::Pending => ("—".to_string(), true),
         };
-        imp.system_row.set_subtitle(&subtitle);
-        imp.system_row.set_sensitive(has_version);
+        imp.host_row.set_subtitle(&subtitle);
+        imp.host_row.set_sensitive(has_version);
     }
 
     /// Refresh the bundled distrobox row: subtitle (version/path/status) and
     /// the context-aware action menu (download / update / re-download).
     fn refresh_bundled_row(&self) {
         let imp = self.imp();
-        let info = crate::distrobox_downloader::get_bundled_info();
-        let is_installed = info.version.is_some();
+        let query = self.root_store().bundled_distrobox_version();
+        let is_installed = query.is_success() && query.data().is_some();
         let update_available = self.root_store().bundled_update_available();
 
-        let subtitle = match (&info.version, &info.path) {
-            (Some(v), Some(p)) => {
+        let subtitle = match query.data() {
+            Some(info) => {
                 if update_available {
-                    format!("{} · {} · {}", v, p, gettext("Update available"))
+                    format!(
+                        "{} · {} · {}",
+                        info.version,
+                        info.path,
+                        gettext("Update available")
+                    )
                 } else {
-                    format!("{} · {}", v, p)
+                    format!("{} · {}", info.version, info.path)
                 }
             }
-            _ => crate::gettext_f!(
+            None => crate::gettext_f!(
                 "Not installed · {version} available",
                 "version" => crate::distrobox_downloader::DISTROBOX_VERSION,
             ),
@@ -412,11 +426,10 @@ impl PreferencesDialog {
 
     /// Sync the radio buttons to the current `distrobox-executable` setting.
     fn sync_selection(&self) {
-        let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-        let is_bundled = settings.string("distrobox-executable") == "bundled";
+        let is_bundled = self.root_store().distrobox_source() == DistroboxSource::Bundled;
         let imp = self.imp();
         imp.bundled_check.set_active(is_bundled);
-        imp.system_check.set_active(!is_bundled);
+        imp.host_check.set_active(!is_bundled);
     }
 
     fn update_delete_button_state(&self) {
