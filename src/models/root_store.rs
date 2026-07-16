@@ -1695,4 +1695,135 @@ mod tests {
             SHORTCUT_DEFINITIONS.len() as u32
         );
     }
+
+    #[gtk::test]
+    fn test_host_distrobox_version_detects_no_version_with_null_runner() {
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        store.host_distrobox_version().refetch();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.host_distrobox_version().is_success()
+        });
+
+        assert!(
+            store.host_distrobox_version().is_success(),
+            "host_distrobox_version should succeed"
+        );
+        assert!(
+            store.host_distrobox_version().data().is_some_and(|d| d.is_none()),
+            "host_distrobox_version data should be None when no host distrobox is available"
+        );
+    }
+
+    #[gtk::test]
+    fn test_distrobox_version_connect_success_fires_with_null_runner() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        store.settings()
+            .set_string("distrobox-executable", "host")
+            .expect("distrobox-executable key must exist in schema");
+
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_clone = fired.clone();
+
+        store.distrobox_version().connect_success(move |_exe| {
+            fired_clone.store(true, Ordering::SeqCst);
+        });
+
+        store.host_distrobox_version().refetch();
+        store.distrobox_version().refetch();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            fired.load(Ordering::SeqCst)
+        });
+
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "distrobox_version connect_success should fire"
+        );
+    }
+
+    #[gtk::test]
+    fn test_welcome_view_not_shown_when_host_distrobox_available() {
+        use crate::fakers::Command;
+
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new()
+                .cmd_full(
+                    Command::new_with_args("distrobox", ["version"]),
+                    || Ok("distrobox: 1.8.2.3".to_string()),
+                )
+                .cmd_full(
+                    Command::new_with_args("sh", ["-c", "command -v distrobox"]),
+                    || Ok("/usr/bin/distrobox".to_string()),
+                )
+                .build(),
+        );
+
+        store.settings()
+            .set_string("distrobox-executable", "host")
+            .expect("distrobox-executable key must exist in schema");
+
+        assert_eq!(
+            store.current_view(),
+            ViewType::Main,
+            "initial view before tasks"
+        );
+
+        store.start_background_tasks();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.distrobox_version().is_success()
+        });
+
+        assert!(
+            store.distrobox_version().is_success(),
+            "distrobox_version should succeed"
+        );
+        assert_eq!(
+            store.current_view(),
+            ViewType::Main,
+            "should stay on Main when host distrobox is available"
+        );
+    }
+
+    #[gtk::test]
+    fn test_welcome_view_shown_when_host_distrobox_not_available() {
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        store.settings()
+            .set_string("distrobox-executable", "host")
+            .expect("distrobox-executable key must exist in schema");
+
+        assert_eq!(
+            store.current_view(),
+            ViewType::Main,
+            "initial view before tasks"
+        );
+
+        store.start_background_tasks();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.distrobox_version().is_success()
+        });
+
+        assert!(
+            store.distrobox_version().is_success(),
+            "distrobox_version should succeed even when not available"
+        );
+        assert!(
+            store.distrobox_version().data().is_some_and(|d| d.is_none()),
+            "distrobox_version should be None when host is not available"
+        );
+        assert_eq!(
+            store.current_view(),
+            ViewType::Welcome,
+            "should redirect to Welcome when host distrobox is not available"
+        );
+    }
 }
