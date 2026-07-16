@@ -24,6 +24,7 @@ use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::fakers::{Command, CommandRunner, FdMode};
 use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
 use crate::models::DistroboxExecutable;
+use crate::models::DistroboxSource;
 use crate::models::DistroboxTask;
 use crate::models::VersionedExecutable;
 use crate::models::ViewType;
@@ -167,7 +168,7 @@ mod imp {
                     #[weak]
                     obj,
                     move |_settings, _key| {
-                        if obj.is_distrobox_bundled() {
+                        if obj.distrobox_source() == DistroboxSource::Bundled {
                             if crate::distrobox_downloader::resolve_bundled_distrobox_path()
                                 .is_none()
                             {
@@ -255,7 +256,7 @@ impl RootStore {
                 return crate::fakers::Command::new(exe.path().to_owned());
             }
             // Fallback: resolve directly
-            let selected_program: String = if this_clone.is_distrobox_bundled() {
+            let selected_program: String = if this_clone.distrobox_source() == DistroboxSource::Bundled {
                 crate::distrobox_downloader::resolve_bundled_distrobox_path()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "distrobox".into())
@@ -331,29 +332,31 @@ impl RootStore {
                 let distrobox = this_clone.distrobox();
                 let version = distrobox.version().map_err(anyhow::Error::from).await?;
 
-                let is_bundled = this_clone.is_distrobox_bundled();
-                let path: String = if is_bundled {
-                    crate::distrobox_downloader::resolve_bundled_distrobox_path()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .ok_or_else(|| anyhow::anyhow!("Bundled distrobox not found"))?
-                } else {
-                    let mut path_cmd = Command::new("sh");
-                    path_cmd.arg("-c").arg("command -v distrobox");
-                    let output = this_clone
-                        .command_runner()
-                        .output(path_cmd)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to resolve system distrobox path: {}", e))?;
-                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    anyhow::ensure!(!s.is_empty(), "System distrobox not found on PATH");
-                    s
+                let source = this_clone.distrobox_source();
+                let path: String = match source {
+                    DistroboxSource::Bundled => {
+                        crate::distrobox_downloader::resolve_bundled_distrobox_path()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .ok_or_else(|| anyhow::anyhow!("Bundled distrobox not found"))?
+                    }
+                    DistroboxSource::Host => {
+                        let mut path_cmd = Command::new("sh");
+                        path_cmd.arg("-c").arg("command -v distrobox");
+                        let output = this_clone
+                            .command_runner()
+                            .output(path_cmd)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to resolve system distrobox path: {}", e))?;
+                        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        anyhow::ensure!(!s.is_empty(), "System distrobox not found on PATH");
+                        s
+                    }
                 };
 
                 let exe = VersionedExecutable { version, path };
-                Ok(if is_bundled {
-                    DistroboxExecutable::Bundled(exe)
-                } else {
-                    DistroboxExecutable::Host(exe)
+                Ok(match source {
+                    DistroboxSource::Bundled => DistroboxExecutable::Bundled(exe),
+                    DistroboxSource::Host => DistroboxExecutable::Host(exe),
                 })
             }
         });
@@ -683,15 +686,19 @@ impl RootStore {
         self.containers_query().refetch();
     }
 
+    pub fn distrobox_source(&self) -> DistroboxSource {
+        DistroboxSource::from_setting(&self.settings())
+    }
+
     /// Whether the current `distrobox-executable` setting selects the bundled distrobox.
     pub fn is_distrobox_bundled(&self) -> bool {
-        self.settings().string("distrobox-executable") == "bundled"
+        self.distrobox_source() == DistroboxSource::Bundled
     }
 
     /// Switch the `distrobox-executable` setting between bundled and host.
-    pub fn set_distrobox_bundled(&self, bundled: bool) {
+    pub fn set_distrobox_source(&self, source: DistroboxSource) {
         self.settings()
-            .set_string("distrobox-executable", if bundled { "bundled" } else { "host" })
+            .set_string("distrobox-executable", source.to_setting_str())
             .expect("Failed to save distrobox-executable setting");
     }
 

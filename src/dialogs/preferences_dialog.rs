@@ -1,6 +1,6 @@
 use crate::backends::supported_terminals;
 use crate::i18n::gettext;
-use crate::models::{DialogType, RootStore};
+use crate::models::{DialogType, DistroboxSource, RootStore};
 use crate::query::LastFetch;
 use crate::widgets::TerminalComboRow;
 
@@ -245,18 +245,26 @@ mod imp {
             version_group.add(&bundled_row);
 
             // Radio → setting
-            system_check.connect_toggled(|cb| {
-                if cb.is_active() {
-                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                    let _ = settings.set_string("distrobox-executable", "host");
+            system_check.connect_toggled(clone!(
+                #[weak(rename_to = this)]
+                obj,
+                move |cb| {
+                    if cb.is_active() {
+                        this.root_store()
+                            .set_distrobox_source(DistroboxSource::Host);
+                    }
                 }
-            });
-            bundled_check.connect_toggled(|cb| {
-                if cb.is_active() {
-                    let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-                    let _ = settings.set_string("distrobox-executable", "bundled");
+            ));
+            bundled_check.connect_toggled(clone!(
+                #[weak(rename_to = this)]
+                obj,
+                move |cb| {
+                    if cb.is_active() {
+                        this.root_store()
+                            .set_distrobox_source(DistroboxSource::Bundled);
+                    }
                 }
-            });
+            ));
 
             // Initial render of both rows + the radio selection
             obj.refresh_system_row();
@@ -283,7 +291,7 @@ mod imp {
             ));
 
             // Keep the radios in sync when the setting changes elsewhere
-            settings.connect_changed(
+            obj.root_store().settings().connect_changed(
                 Some("distrobox-executable"),
                 clone!(
                     #[weak(rename_to = this)]
@@ -416,8 +424,7 @@ impl PreferencesDialog {
 
     /// Sync the radio buttons to the current `distrobox-executable` setting.
     fn sync_selection(&self) {
-        let settings = gio::Settings::new("com.ranfdev.DistroShelf");
-        let is_bundled = settings.string("distrobox-executable") == "bundled";
+        let is_bundled = self.root_store().distrobox_source() == DistroboxSource::Bundled;
         let imp = self.imp();
         imp.bundled_check.set_active(is_bundled);
         imp.system_check.set_active(!is_bundled);

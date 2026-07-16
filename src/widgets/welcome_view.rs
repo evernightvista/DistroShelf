@@ -2,7 +2,7 @@
 // This file is licensed under the same terms as the project it belongs to
 
 use crate::i18n::gettext;
-use crate::models::{DialogType, RootStore, ViewType};
+use crate::models::{DialogType, DistroboxSource, RootStore, ViewType};
 use crate::widgets::TerminalComboRow;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -394,7 +394,7 @@ mod imp {
             obj.root_store().set_current_dialog(DialogType::TaskManager);
 
             // Set the preference for future launches
-            obj.root_store().set_distrobox_bundled(true);
+            obj.root_store().set_distrobox_source(DistroboxSource::Bundled);
         }
     }
 }

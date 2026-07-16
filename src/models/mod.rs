@@ -12,7 +12,7 @@ pub mod view_type;
 pub use container::Container;
 pub use container_sort_key::ContainerSortKey;
 pub use dialog_type::{DialogParams, DialogType};
-pub use distrobox_executable::DistroboxExecutable;
+pub use distrobox_executable::{DistroboxExecutable, DistroboxSource};
 pub use distrobox_task::{DistroboxTask, TaskStatus};
 pub use known_distros::{KnownDistro, known_distro_by_image};
 pub use root_store::RootStore;
