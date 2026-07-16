@@ -25,12 +25,15 @@ use adw::subclass::prelude::*;
 use glib::Properties;
 use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
 use crate::DistroShelfWindow;
 use crate::backends;
 use crate::backends::{Distrobox, DistroboxCommandRunnerResponse};
 use crate::config;
 use crate::fakers::CommandRunner;
+use crate::fakers::NullCommandRunnerBuilder;
 use crate::models::known_distros;
 use crate::root_store::RootStore;
 
@@ -225,7 +228,16 @@ impl DistroShelfApplication {
                 DistroboxCommandRunnerResponse::new_common_images(),
             ]),
             DistroboxStoreTy::NullNoVersion => {
-                Distrobox::null_command_runner(&[DistroboxCommandRunnerResponse::NoVersion])
+                let mut builder = NullCommandRunnerBuilder::new();
+                for res in &[DistroboxCommandRunnerResponse::NoVersion] {
+                    for (cmd, out) in res.clone().into_commands() {
+                        builder.cmd_full(cmd, move || out());
+                    }
+                }
+                // Unmatched commands (test -e, command -v, etc.) should fail
+                // so that both host and bundled distrobox appear unavailable.
+                builder.fallback(ExitStatus::from_raw(1));
+                builder.build()
             }
             _ => {
                 let command_runner = CommandRunner::new_real();

@@ -1919,4 +1919,59 @@ mod tests {
             "should stay on Main when bundled distrobox is installed"
         );
     }
+
+    #[gtk::test]
+    fn test_null_no_version_both_queries_are_none() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // Mirror DistroboxStoreTy::NullNoVersion: distrobox version fails,
+        // fallback exit status is non-zero so all other commands (test -e,
+        // command -v, etc.) also fail.
+        let runner = NullCommandRunnerBuilder::new()
+            .cmd_full_with_status(
+                {
+                    let mut cmd = Command::new("distrobox");
+                    cmd.arg("version");
+                    cmd
+                },
+                ExitStatusExt::from_raw(1),
+                || Ok(String::new()),
+            )
+            .fallback(ExitStatusExt::from_raw(1))
+            .build();
+
+        let store = RootStore::new(runner);
+
+        store.start_background_tasks();
+
+        // Wait for both queries to settle
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.host_distrobox_version().is_success()
+                && store.bundled_distrobox_version().is_success()
+        });
+
+        assert!(
+            store.host_distrobox_version().is_success(),
+            "host_distrobox_version should succeed"
+        );
+        assert!(
+            store
+                .host_distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_none()),
+            "host_distrobox_version should be None"
+        );
+
+        assert!(
+            store.bundled_distrobox_version().is_success(),
+            "bundled_distrobox_version should succeed"
+        );
+        assert!(
+            store
+                .bundled_distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_none()),
+            "bundled_distrobox_version should be None"
+        );
+    }
 }

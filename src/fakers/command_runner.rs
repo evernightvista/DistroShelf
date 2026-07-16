@@ -182,7 +182,6 @@ impl InnerCommandRunner for RealCommandRunner {
 #[derive(Default, Clone)]
 pub struct NullCommandRunnerBuilder {
     responses: ResponseMap,
-    #[allow(dead_code)]
     fallback_exit_status: ExitStatus,
 }
 
@@ -238,7 +237,6 @@ impl NullCommandRunnerBuilder {
 #[derive(Default, Clone)]
 pub struct NullCommandRunner {
     responses: ResponseMap,
-    #[allow(dead_code)]
     fallback_exit_status: ExitStatus,
 }
 
@@ -257,11 +255,12 @@ impl NullCommandRunner {
 impl InnerCommandRunner for NullCommandRunner {
     fn spawn(&self, command: Command) -> io::Result<Box<dyn Child + Send>> {
         let key = Self::key_for_cmd(&command);
+        let fallback = self.fallback_exit_status;
         let response = self
             .responses
             .get(&key[..])
             .cloned()
-            .unwrap_or(Rc::new(|| Ok((String::new(), ExitStatus::from_raw(0)))));
+            .unwrap_or(Rc::new(move || Ok((String::new(), fallback))));
         let (stdout, status) = response()?;
         let stub = StubChild::new_null(vec![], Cursor::new(stdout), Cursor::new(""), move || {
             Ok(status)
@@ -273,11 +272,12 @@ impl InnerCommandRunner for NullCommandRunner {
         command: Command,
     ) -> Pin<Box<dyn Future<Output = io::Result<std::process::Output>>>> {
         let key = Self::key_for_cmd(&command);
+        let fallback = self.fallback_exit_status;
         let response = self
             .responses
             .get(&key[..])
             .cloned()
-            .unwrap_or(Rc::new(|| Ok((String::new(), ExitStatus::from_raw(0)))));
+            .unwrap_or(Rc::new(move || Ok((String::new(), fallback))));
 
         async move {
             let (stdout, status) = response()?;
