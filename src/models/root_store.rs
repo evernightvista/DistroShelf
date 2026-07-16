@@ -304,14 +304,15 @@ impl RootStore {
             .set(selection)
             .expect("selected_container_model already set");
 
-        // selected_source drives the distrobox_version derivation. When the
-        // distrobox-executable setting changes, supply() is called on this
-        // query, which triggers switch_map to wire up the appropriate inner query.
-        let selected_source = Query::<DistroboxSource>::new("selected_source".into(), || async {
-            Ok(DistroboxSource::Host)
-        });
-        let current_source = DistroboxSource::from_setting(&this.settings());
-        selected_source.supply(current_source);
+        // selected_source drives the distrobox_version derivation.
+        // The fetcher reads the current value from GSettings so refetch()
+        // responds to setting changes without an external supply() call.
+        let this_clone_for_source = this.clone();
+        let selected_source =
+            Query::<DistroboxSource>::new("selected_source".into(), move || {
+                let this = this_clone_for_source.clone();
+                async move { Ok(DistroboxSource::from_setting(&this.settings())) }
+            });
 
         // Host derivation: host_distrobox_info -> DistroboxExecutable::Host.
         // When host_distrobox_info has no data (not installed), the derived
@@ -525,7 +526,7 @@ impl RootStore {
                     selected_source_clone,
                     move |_settings, _key| {
                         let new_source = DistroboxSource::from_setting(&obj.settings());
-                        selected_source_clone.supply(new_source);
+                        selected_source_clone.refetch();
                         if new_source == DistroboxSource::Bundled {
                             if crate::distrobox_downloader::resolve_bundled_distrobox_path()
                                 .is_none()
