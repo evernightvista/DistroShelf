@@ -77,7 +77,7 @@ mod imp {
 
         pub distrobox_version: RefCell<Query<DistroboxExecutable>>,
         pub bundled_distrobox_version: Query<VersionedExecutable>,
-        pub system_distrobox_info: Query<Option<VersionedExecutable>>,
+        pub host_distrobox_info: Query<Option<VersionedExecutable>>,
         pub images_query: Query<Vec<String>>,
         pub downloaded_images_query: Query<HashSet<String>>,
         pub containers_query: Query<Vec<Container>>,
@@ -143,7 +143,7 @@ mod imp {
                         path: String::new(),
                     })
                 }),
-                system_distrobox_info: Query::new("system_distrobox_info".into(), || async {
+                host_distrobox_info: Query::new("host_distrobox_info".into(), || async {
                     Ok(None)
                 }),
                 images_query: Query::new("images".into(), || async { Ok(vec![]) }),
@@ -313,10 +313,10 @@ impl RootStore {
         let current_source = DistroboxSource::from_setting(&this.settings());
         selected_source.supply(current_source);
 
-        // Host derivation: system_distrobox_info -> DistroboxExecutable::Host.
-        // When system_distrobox_info has no data (not installed), the derived
+        // Host derivation: host_distrobox_info -> DistroboxExecutable::Host.
+        // When host_distrobox_info has no data (not installed), the derived
         // query is put into error state.
-        let host_version = this.system_distrobox_info().switch_map(|info| {
+        let host_version = this.host_distrobox_info().switch_map(|info| {
             match info {
                 Some(exe) => Query::pure(DistroboxExecutable::Host(exe.clone())),
                 None => {
@@ -358,7 +358,7 @@ impl RootStore {
         });
 
         let this_clone = this.clone();
-        this.imp().system_distrobox_info.set_fetcher(move || {
+        this.imp().host_distrobox_info.set_fetcher(move || {
             let command_runner = this_clone.command_runner();
             async move {
                 let mut version_cmd = Command::new("distrobox");
@@ -535,7 +535,7 @@ impl RootStore {
                                 obj.bundled_distrobox_version().refetch();
                             }
                         } else {
-                            obj.system_distrobox_info().refetch();
+                            obj.host_distrobox_info().refetch();
                         }
                         obj.update_bundled_update_available();
                     }
@@ -595,7 +595,7 @@ impl RootStore {
     }
 
     pub fn start_background_tasks(&self) {
-        self.system_distrobox_info().refetch();
+        self.host_distrobox_info().refetch();
         self.bundled_distrobox_version().refetch();
         self.container_runtime().refetch();
         self.terminal_repository().load_all();
@@ -665,8 +665,8 @@ impl RootStore {
         self.imp().bundled_distrobox_version.clone()
     }
 
-    pub fn system_distrobox_info(&self) -> Query<Option<VersionedExecutable>> {
-        self.imp().system_distrobox_info.clone()
+    pub fn host_distrobox_info(&self) -> Query<Option<VersionedExecutable>> {
+        self.imp().host_distrobox_info.clone()
     }
 
     pub fn container_runtime(&self) -> Query<DetectedRuntime> {
