@@ -133,8 +133,11 @@ Shell script in `src/backends/distrobox/POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh` 
 
 ## Tools
 
-### GNOME Documentation Librarian Agent
-Call #tool:runSubagent with `gnome-doc-librarian` to fetch up-to-date documentation for GNOME libraries and components.
+### GNOME SDK Docs Skill
+Use the `gnome-sdk-docs` skill for guidance on browsing GObject Introspection (`.gir`) files, D-Bus interfaces, and icon discovery for GNOME library development.
+
+### Subagent Tool
+Use the `subagent` tool to delegate heavy tasks to specialized agents with isolated context. Available agents: `scout` (fast codebase recon), `planner` (implementation plans), `reviewer` (code review), `worker` (general-purpose). Supports single, parallel, and chained modes.
 
 ### Version Control System
 jujutsu is the VCS used to manage the project. Run `jj -h` to see the full list of commands supported by the version installed.
