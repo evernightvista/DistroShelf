@@ -21,6 +21,9 @@ use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime}
 use crate::backends::podman::PodmanEvent;
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
+use crate::distrobox_init_migration::{
+    StaleContainer, current_init_path, find_stale_containers, migrate_stale_path,
+};
 use crate::fakers::{Command, CommandRunner, FdMode};
 use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
 use crate::models::DistroboxExecutable;
@@ -94,6 +97,15 @@ mod imp {
         #[property(get, set, nullable)]
         pub selected_task: RefCell<Option<DistroboxTask>>,
 
+        /// Containers whose baked-in `distrobox-init` path no longer exists
+        /// (see docs/distrobox-init-migration.md). Items are
+        /// `BoxedAnyObject`s wrapping [`StaleContainer`].
+        pub stale_containers: TypedListStore<glib::BoxedAnyObject>,
+        /// Guards against concurrent stale-container checks; a check
+        /// requested while one is running is deferred, not dropped.
+        pub stale_check_running: std::cell::Cell<bool>,
+        pub stale_check_pending: std::cell::Cell<bool>,
+
         #[property(get)]
         pub settings: gio::Settings,
 
@@ -147,6 +159,9 @@ mod imp {
                 containers_query: Query::new("containers".into(), || async { Ok(vec![]) }),
                 tasks: TypedListStore::new(),
                 selected_task: Default::default(),
+                stale_containers: TypedListStore::new(),
+                stale_check_running: std::cell::Cell::new(false),
+                stale_check_pending: std::cell::Cell::new(false),
                 bundled_update_available: std::cell::Cell::new(false),
                 settings: gio::Settings::new("com.ranfdev.DistroShelf"),
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
@@ -363,11 +378,22 @@ impl RootStore {
                 );
             }
             this_clone.update_bundled_update_available();
+            // The resolved init location may have changed (bundle upgraded,
+            // source switched); re-check which containers point to stale paths.
+            this_clone.check_stale_containers();
         });
         let this_clone = this.clone();
         this.distrobox_version().connect_error(move |_error| {
             this_clone.set_current_view(ViewType::Welcome);
             this_clone.update_bundled_update_available();
+        });
+
+        // The stale-container check needs the container runtime for
+        // `inspect`; re-run it once the runtime becomes available in case the
+        // first check (triggered by distrobox_version) ran too early.
+        let this_clone = this.clone();
+        this.container_runtime().connect_success(move |_runtime| {
+            this_clone.check_stale_containers();
         });
 
         let this_clone = this.clone();
@@ -720,6 +746,185 @@ impl RootStore {
 
     pub fn tasks(&self) -> &TypedListStore<DistroboxTask> {
         &self.imp().tasks
+    }
+
+    /// Containers that need their `distrobox-init` path migrated. Items are
+    /// `BoxedAnyObject`s wrapping [`StaleContainer`].
+    pub fn stale_containers(&self) -> &TypedListStore<glib::BoxedAnyObject> {
+        &self.imp().stale_containers
+    }
+
+    /// Inspects every container and records in `stale_containers()` those
+    /// whose baked-in `distrobox-init` bind-mount no longer resolves (see
+    /// docs/distrobox-init-migration.md). Runs automatically whenever the
+    /// resolved distrobox executable changes (startup, source switch, bundle
+    /// download) and when the container runtime becomes available.
+    ///
+    /// Only one check runs at a time; a call made while a check is in
+    /// flight schedules a single re-run once it finishes.
+    pub fn check_stale_containers(&self) {
+        let imp = self.imp();
+        if imp.stale_check_running.get() {
+            imp.stale_check_pending.set(true);
+            return;
+        }
+        imp.stale_check_running.set(true);
+        let this = self.clone();
+        glib::MainContext::ref_thread_default().spawn_local(async move {
+            loop {
+                this.run_stale_check().await;
+                if !this.imp().stale_check_pending.replace(false) {
+                    break;
+                }
+            }
+            this.imp().stale_check_running.set(false);
+        });
+    }
+
+    async fn run_stale_check(&self) {
+        let Some(Some(exe)) = self.distrobox_version().data() else {
+            if !self.stale_containers().is_empty() {
+                self.stale_containers().remove_all();
+            }
+            return;
+        };
+        let Some(current_init) = current_init_path(exe.path()) else {
+            warn!(
+                path = %exe.path(),
+                "Cannot determine distrobox-init location; skipping stale container check"
+            );
+            return;
+        };
+        let Some(detected) = self.container_runtime().data() else {
+            debug!("Container runtime not available yet; skipping stale container check");
+            return;
+        };
+        let containers = match self.distrobox().list().await {
+            Ok(containers) => containers,
+            Err(e) => {
+                warn!(error = %e, "Failed to list containers for stale-init check");
+                return;
+            }
+        };
+        let containers: Vec<(String, bool)> = containers
+            .into_values()
+            .map(|c| (c.name, matches!(c.status, Status::Up(_))))
+            .collect();
+
+        let stale = find_stale_containers(
+            &self.command_runner(),
+            detected.runtime.as_ref(),
+            &containers,
+            &current_init,
+        )
+        .await;
+
+        if !stale.is_empty() {
+            info!(
+                count = stale.len(),
+                "Found containers with stale distrobox-init paths"
+            );
+        }
+        // Reconcile keyed on the full entry value: unchanged entries keep
+        // their object identity and no items-changed signals fire when the
+        // stale set did not change between checks.
+        let new_items: Vec<glib::BoxedAnyObject> =
+            stale.into_iter().map(glib::BoxedAnyObject::new).collect();
+        reconcile_list_by_key(
+            self.stale_containers(),
+            &new_items[..],
+            |obj| obj.borrow::<StaleContainer>().clone(),
+            &[],
+        );
+    }
+
+    /// Repairs all containers in `stale_containers()` by symlinking their
+    /// stale `distrobox-init` paths to the current one. Running containers
+    /// are skipped (stop them and re-run). Returns the task so the caller
+    /// can display it.
+    pub fn migrate_stale_containers(&self) -> DistroboxTask {
+        // Guard: if a migration task is already in progress, return it
+        // instead of creating a duplicate.
+        for task in self.tasks().iter() {
+            if task.name() == "migrate-init" && !task.ended() {
+                return task;
+            }
+        }
+
+        let stale: Vec<StaleContainer> = self
+            .stale_containers()
+            .iter()
+            .map(|obj| obj.borrow::<StaleContainer>().clone())
+            .collect();
+        let this = self.clone();
+        self.create_task("system", "migrate-init", move |task| async move {
+            task.set_description(
+                "Repairing containers that point to an outdated distrobox-init location",
+            );
+            let Some(Some(exe)) = this.distrobox_version().data() else {
+                anyhow::bail!("No distrobox executable available");
+            };
+            let Some(current_init) = current_init_path(exe.path()) else {
+                anyhow::bail!(
+                    "Cannot determine the distrobox-init location from {}",
+                    exe.path()
+                );
+            };
+
+            // Re-check which containers are running right now: migrating a
+            // container while it is starting is racy (see docs).
+            let running: HashSet<String> = this
+                .distrobox()
+                .list()
+                .await?
+                .into_values()
+                .filter(|c| matches!(c.status, Status::Up(_)))
+                .map(|c| c.name)
+                .collect();
+
+            let runner = this.command_runner();
+            let mut failed = 0;
+            let mut skipped = 0;
+            for entry in &stale {
+                if running.contains(&entry.name) {
+                    task.append_output(&format!(
+                        "Skipping {}: the container is running. Stop it and migrate again.\r\n",
+                        entry.name
+                    ));
+                    skipped += 1;
+                    continue;
+                }
+                task.append_output(&format!(
+                    "{}: linking {} -> {}\r\n",
+                    entry.name,
+                    entry.stale_init_path.display(),
+                    current_init.display()
+                ));
+                match migrate_stale_path(&runner, &entry.stale_init_path, &current_init).await {
+                    Ok(()) => {
+                        task.append_output(&format!("{}: migrated successfully\r\n", entry.name));
+                    }
+                    Err(e) => {
+                        task.append_output(&format!("{}: failed: {}\r\n", entry.name, e));
+                        failed += 1;
+                    }
+                }
+            }
+
+            this.check_stale_containers();
+            if failed > 0 {
+                anyhow::bail!("Failed to migrate {} container(s)", failed);
+            }
+            if skipped > 0 {
+                // Not a failure: the fix is simply deferred until the
+                // containers are stopped (see docs/distrobox-init-migration.md).
+                task.append_output(&format!(
+                    "Skipped {} running container(s). Stop them and migrate again.\r\n",
+                    skipped
+                ));
+            }
+            Ok(())
+        })
     }
 
     pub fn selected_container_model(&self) -> gtk::SingleSelection {

@@ -3,7 +3,9 @@ use std::{collections::HashMap, collections::HashSet, rc::Rc};
 use async_trait::async_trait;
 
 use crate::{
-    backends::container_runtime::{ContainerInspectInfo, ContainerRuntime, Usage},
+    backends::container_runtime::{
+        ContainerInspectInfo, ContainerRuntime, ENTRYPOINT_MOUNT_DESTINATION, Usage,
+    },
     fakers::{Command, CommandRunner},
     root_store::Image,
 };
@@ -16,6 +18,14 @@ struct InspectOutput {
     created: Option<String>,
     #[serde(rename = "State", default)]
     state: Option<InspectState>,
+}
+
+#[derive(serde::Deserialize)]
+struct InspectMount {
+    #[serde(rename = "Source", default)]
+    source: Option<String>,
+    #[serde(rename = "Destination", default)]
+    destination: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -177,5 +187,36 @@ impl ContainerRuntime for Docker {
         }
 
         Ok(result)
+    }
+
+    async fn entrypoint_mount_source(&self, container_id: &str) -> anyhow::Result<Option<String>> {
+        let mut cmd = Command::new("docker");
+        cmd.arg("inspect");
+        cmd.arg("--format");
+        cmd.arg("{{ json .Mounts }}");
+        cmd.arg(container_id);
+
+        let output = self.cmd_runner.output(cmd).await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "inspect of {} failed ({}): {}",
+                container_id,
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let text = stdout.trim();
+        if text.is_empty() || text == "null" {
+            return Ok(None);
+        }
+
+        let mounts: Vec<InspectMount> = serde_json::from_str(text)?;
+        Ok(mounts
+            .into_iter()
+            .find(|m| m.destination.as_deref() == Some(ENTRYPOINT_MOUNT_DESTINATION))
+            .and_then(|m| m.source))
     }
 }

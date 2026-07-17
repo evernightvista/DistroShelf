@@ -10,6 +10,10 @@ use super::docker::Docker;
 
 use crate::{backends::podman::Podman, fakers::CommandRunner};
 
+/// The in-container destination of the `distrobox-init` bind-mount. Distrobox
+/// mounts the host's `distrobox-init` at this path and uses it as entrypoint.
+pub const ENTRYPOINT_MOUNT_DESTINATION: &str = "/usr/bin/entrypoint";
+
 #[async_trait(?Send)]
 pub trait ContainerRuntime {
     fn name(&self) -> &'static str;
@@ -21,6 +25,10 @@ pub trait ContainerRuntime {
         &self,
         container_ids: &[&str],
     ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>>;
+    /// Returns the host-side source path of the bind-mount whose destination
+    /// is [`ENTRYPOINT_MOUNT_DESTINATION`], or `None` when the container has
+    /// no such mount (e.g. it was not created by distrobox).
+    async fn entrypoint_mount_source(&self, container_id: &str) -> anyhow::Result<Option<String>>;
 }
 
 #[derive(Debug, Clone, Default)]

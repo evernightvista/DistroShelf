@@ -146,6 +146,10 @@ impl ContainerRuntime for Podman {
     ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>> {
         self.docker.inspect_containers(container_ids).await
     }
+
+    async fn entrypoint_mount_source(&self, container_id: &str) -> anyhow::Result<Option<String>> {
+        self.docker.entrypoint_mount_source(container_id).await
+    }
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ mod backends;
 mod config;
 mod dialogs;
 mod distrobox_downloader;
+mod distrobox_init_migration;
 mod fakers;
 mod gtk_utils;
 pub mod i18n;

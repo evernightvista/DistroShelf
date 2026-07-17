@@ -1,0 +1,9 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "distrobox": {
+      "repository": "89luca89/distrobox",
+      "description": "Upstream distrobox source code. Use for distrobox CLI behavior, flags, and implementation details."
+    }
+  }
+}

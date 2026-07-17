@@ -4,6 +4,7 @@
 // All user-visible strings should use the gettext() function for translation.
 
 pub use gettextrs::gettext;
+pub use gettextrs::ngettext;
 
 /// Translate a string with formatting arguments.
 /// Use this macro like: `gettext_f("Hello, {}!", &[("name", name)])`

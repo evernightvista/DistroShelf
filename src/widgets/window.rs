@@ -22,7 +22,7 @@ use crate::dialogs::{
     CommandLogDialog, CreateDistroboxDialog, ExportableAppsDialog, PreferencesDialog,
     TaskManagerDialog,
 };
-use crate::i18n::gettext;
+use crate::i18n::{gettext, ngettext};
 use crate::models::{Container, DialogParams, DialogType};
 use crate::models::ContainerSortKey;
 use crate::root_store::RootStore;
@@ -69,6 +69,8 @@ mod imp {
         pub split_view: TemplateChild<adw::NavigationSplitView>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub migration_banner: TemplateChild<adw::Banner>,
         #[template_child]
         pub welcome_view: TemplateChild<crate::widgets::WelcomeView>,
         #[template_child]
@@ -196,6 +198,7 @@ impl DistroShelfWindow {
                 dialog.present(Some(&this_clone));
             });
         this.build_sidebar();
+        this.build_migration_banner();
         this.root_store().load_containers();
 
         // Refresh data when the window regains focus: the user may have run
@@ -445,6 +448,45 @@ impl DistroShelfWindow {
 
     pub fn add_toast(&self, toast: adw::Toast) {
         self.imp().toast_overlay.add_toast(toast);
+    }
+
+    /// Shows a banner when some containers reference a stale
+    /// `distrobox-init` path, offering a one-click migration (see
+    /// docs/distrobox-init-migration.md).
+    fn build_migration_banner(&self) {
+        let banner = self.imp().migration_banner.clone();
+
+        self.root_store()
+            .stale_containers()
+            .inner()
+            .connect_items_changed(clone!(
+                #[weak]
+                banner,
+                move |list, _position, _removed, _added| {
+                    let count = list.n_items();
+                    if count > 0 {
+                        // TRANSLATORS: "migration" here means repairing containers
+                        // that reference a distrobox-init file which no longer
+                        // exists (e.g. after a Distrobox update); no container
+                        // data is touched.
+                        banner.set_title(&ngettext(
+                            "A container points to an outdated Distrobox and needs migration",
+                            "Some containers point to an outdated Distrobox and need migration",
+                            count,
+                        ));
+                    }
+                    banner.set_revealed(count > 0);
+                }
+            ));
+
+        banner.connect_button_clicked(clone!(
+            #[weak(rename_to = this)]
+            self,
+            move |_| {
+                let task = this.root_store().migrate_stale_containers();
+                this.root_store().view_task(&task);
+            }
+        ));
     }
 
     fn open_terminal(&self) {

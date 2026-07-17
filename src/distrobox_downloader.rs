@@ -96,7 +96,7 @@ async fn ensure_stable_bundled_dir(command_runner: &CommandRunner) {
 }
 
 /// Checks if a path exists by running `test -e` through the command runner.
-async fn path_exists(command_runner: &CommandRunner, path: &Path) -> bool {
+pub async fn path_exists(command_runner: &CommandRunner, path: &Path) -> bool {
     let mut cmd = Command::new("test");
     cmd.arg("-e");
     cmd.arg(path);
