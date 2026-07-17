@@ -35,8 +35,6 @@ use crate::models::{Container, ContainerSortKey};
 use crate::models::{DialogParams, DialogType};
 use crate::query::Query;
 
-use serde::Deserialize;
-
 const SHORTCUT_DEFINITIONS: [(&str, &str); 13] = [
     ("<primary>q", "app.quit"),
     ("<primary>question", "app.shortcuts"),
@@ -52,15 +50,6 @@ const SHORTCUT_DEFINITIONS: [(&str, &str); 13] = [
     ("<primary>l", "win.command-log"),
     ("<primary>d", "win.delete-container"),
 ];
-
-#[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
-#[serde(rename_all = "PascalCase")]
-pub struct Image {
-    #[serde(rename = "Id")]
-    pub id: String,
-    #[serde(rename = "Names")]
-    pub names: Option<Vec<String>>,
-}
 
 mod imp {
     use crate::{

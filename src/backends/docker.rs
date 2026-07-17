@@ -7,7 +7,7 @@ use crate::{
         ContainerInspectInfo, ContainerRuntime, ENTRYPOINT_MOUNT_DESTINATION, Usage,
     },
     fakers::{Command, CommandRunner},
-    root_store::Image,
+    models::Image,
 };
 
 #[derive(serde::Deserialize)]
