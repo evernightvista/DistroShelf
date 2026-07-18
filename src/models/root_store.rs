@@ -24,6 +24,7 @@ use crate::distrobox_init_migration::{StaleContainer, current_init_path, migrate
 use crate::fakers::{Command, CommandRunner, FdMode};
 use crate::gtk_utils::TypedListStore;
 use crate::models::Container;
+use crate::models::ContainerSortKey;
 use crate::models::DistroboxExecutable;
 use crate::models::DistroboxSource;
 use crate::models::DistroboxTask;
@@ -154,10 +155,15 @@ mod imp {
             match value {
                 ViewType::Main => {
                     if self.main_store.borrow().is_none() {
+                        let settings = obj.settings();
+                        let sort_key = ContainerSortKey::from_str(&settings.string("sort-key"))
+                            .unwrap_or_default();
                         let main = MainStore::new(
                             obj.command_runner(),
                             obj.container_runtime(),
                             obj.distrobox_version(),
+                            sort_key,
+                            settings,
                         );
                         *self.main_store.borrow_mut() = Some(main);
                     }
@@ -399,10 +405,15 @@ impl RootStore {
         this.enable_shortcuts();
 
         // Create MainStore and set initial view to Main (optimistic start)
+        let settings = this.settings();
+        let sort_key = ContainerSortKey::from_str(&settings.string("sort-key"))
+            .unwrap_or_default();
         let main_store = MainStore::new(
             command_runner.clone(),
             this.container_runtime(),
             this.distrobox_version(),
+            sort_key,
+            settings,
         );
         *this.imp().main_store.borrow_mut() = Some(main_store);
         this.set_current_view(ViewType::Main);

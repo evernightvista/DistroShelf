@@ -4,6 +4,7 @@ use glib::Properties;
 use glib::subclass::prelude::*;
 use gtk::glib;
 use gtk::glib::clone;
+use gtk::gio;
 use gtk::prelude::*;
 use std::cell::OnceCell;
 use std::cell::RefCell;
@@ -46,6 +47,8 @@ mod imp {
         #[property(get, set, builder(ContainerSortKey::default()))]
         pub containers_sort_key: RefCell<ContainerSortKey>,
 
+        pub settings: OnceCell<gio::Settings>,
+
         /// Containers whose baked-in `distrobox-init` path no longer exists
         pub stale_containers: TypedListStore<glib::BoxedAnyObject>,
         /// Guards against concurrent stale-container checks
@@ -74,6 +77,7 @@ mod imp {
                 sorted_container_model: OnceCell::new(),
                 containers_sorter: OnceCell::new(),
                 containers_sort_key: RefCell::new(ContainerSortKey::default()),
+                settings: OnceCell::new(),
                 stale_containers: TypedListStore::new(),
                 stale_check_running: std::cell::Cell::new(false),
                 stale_check_pending: std::cell::Cell::new(false),
@@ -100,6 +104,8 @@ impl MainStore {
         command_runner: CommandRunner,
         runtime_query: Query<DetectedRuntime>,
         distrobox_version: Query<Option<DistroboxExecutable>>,
+        containers_sort_key: ContainerSortKey,
+        settings: gio::Settings,
     ) -> Self {
         let this: Self = glib::Object::builder().build();
 
@@ -132,6 +138,13 @@ impl MainStore {
             .unwrap();
         this.imp().runtime_query.replace(runtime_query);
         this.imp().distrobox_version.replace(distrobox_version);
+
+        this.imp()
+            .settings
+            .set(settings)
+            .map_err(|_| "settings already set")
+            .unwrap();
+        this.set_containers_sort_key(containers_sort_key);
 
         let main_weak = this.downgrade();
         let sorter = gtk::CustomSorter::new(move |obj1, obj2| {
@@ -174,6 +187,10 @@ impl MainStore {
                     .changed(gtk::SorterChange::Different);
             }
         ));
+
+        this.connect_containers_sort_key_notify(move |obj| {
+            let _ = obj.settings().set_string("sort-key", obj.containers_sort_key().to_str());
+        });
 
         this.imp()
             .sorted_container_model
@@ -307,6 +324,10 @@ impl MainStore {
 
     pub fn command_runner(&self) -> CommandRunner {
         self.imp().command_runner.get().unwrap().clone()
+    }
+
+    pub fn settings(&self) -> &gio::Settings {
+        self.imp().settings.get().unwrap()
     }
 
     pub fn runtime_query(&self) -> Query<DetectedRuntime> {
@@ -552,6 +573,10 @@ mod tests {
         })
     }
 
+    fn test_settings() -> gio::Settings {
+        gio::Settings::new("com.ranfdev.DistroShelf")
+    }
+
     fn container_info(
         id: &str,
         name: &str,
@@ -587,7 +612,7 @@ mod tests {
             container_info("1", "Ubuntu", None, None),
             container_info("2", "Fedora", None, None),
         ])]);
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
 
         store.load_containers();
         spin_main_context_until(Duration::from_secs(5), || {
@@ -618,7 +643,7 @@ mod tests {
                 )
                 .build()
         };
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
 
         store.load_containers();
         spin_main_context_until(Duration::from_secs(5), || {
@@ -670,6 +695,8 @@ mod tests {
             NullCommandRunnerBuilder::new().build(),
             no_runtime_query(),
             version_query("distrobox"),
+            ContainerSortKey::default(),
+            test_settings(),
         );
 
         let noop: Rc<dyn Fn()> = Rc::new(|| {});
@@ -732,7 +759,7 @@ mod tests {
             container_info("1", "Ubuntu", None, None),
             container_info("2", "Fedora", None, None),
         ])]);
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
 
         assert!(store.selected_container().is_none());
         assert!(store.selected_container_name().is_none());
@@ -782,6 +809,8 @@ mod tests {
             runner,
             Query::pure(runtime),
             version_query("/usr/bin/distrobox"),
+            ContainerSortKey::default(),
+            test_settings(),
         );
 
         store.check_stale_containers();
@@ -810,6 +839,8 @@ mod tests {
             NullCommandRunnerBuilder::new().build(),
             no_runtime_query(),
             Query::pure(None),
+            ContainerSortKey::default(),
+            test_settings(),
         );
         store
             .stale_containers()
@@ -836,6 +867,8 @@ mod tests {
             NullCommandRunnerBuilder::new().build(),
             no_runtime_query(),
             Query::pure(None),
+            ContainerSortKey::default(),
+            test_settings(),
         );
 
         assert!(

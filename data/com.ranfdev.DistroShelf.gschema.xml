@@ -26,5 +26,10 @@
 			<summary>Use --no-entry when creating a distrobox</summary>
 			<description>When enabled, distrobox create commands include --no-entry by default.</description>
 		</key>
+		<key name="sort-key" type="s">
+			<default>'name'</default>
+			<summary>Container sort key</summary>
+			<description>The sort key for the container list. One of 'name', 'creation-date', or 'last-used'.</description>
+		</key>
 	</schema>
 </schemalist>

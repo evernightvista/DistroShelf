@@ -362,10 +362,11 @@ impl DistroShelfWindow {
         sort_action.connect_activate(clone!(
             #[weak(rename_to = this)]
             self,
-            move |_action, param| {
+            move |action, param| {
                 if let Some(v) = param {
                     let s: String = v.get().unwrap();
                     if let Some(key) = ContainerSortKey::from_str(&s) {
+                        action.change_state(&v);
                         if let Some(main) = this.root_store().main_store() {
                             main.set_containers_sort_key(key);
                         }
@@ -381,6 +382,12 @@ impl DistroShelfWindow {
             .connect_main_store_notify(move |root_store| {
                 if let Some(main) = root_store.main_store() {
                     let this = this_clone.clone();
+                    // Sync current value immediately (catches cases where
+                    // the initial main-store notification was missed)
+                    let current_key = main.containers_sort_key();
+                    if let Some(action) = this.lookup_action("sort-key") {
+                        action.change_state(&current_key.to_str().to_variant());
+                    }
                     let handler_id = main.connect_containers_sort_key_notify(move |main| {
                         let sort_key = main.containers_sort_key();
                         if let Some(action) = this.lookup_action("sort-key") {
@@ -395,6 +402,15 @@ impl DistroShelfWindow {
                         .replace(Some(handler_id));
                 }
             });
+
+        // Sync the current sort key from main_store immediately, in case
+        // the initial main-store notification was emitted before this
+        // handler was registered.
+        if let Some(main) = self.root_store().main_store() {
+            if let Some(action) = self.lookup_action("sort-key") {
+                action.change_state(&main.containers_sort_key().to_str().to_variant());
+            }
+        }
     }
 
     fn build_sidebar(&self) {
