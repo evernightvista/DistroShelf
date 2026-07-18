@@ -675,10 +675,17 @@ impl RootStore {
                         continue;
                     }
                     task.append_output(&format!(
-                        "{}: linking {} -> {}\r\n",
+                        "{}: linking scripts in {} -> {}\r\n",
                         entry.name,
-                        entry.stale_init_path.display(),
-                        current_init.display()
+                        entry
+                            .stale_init_path
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        current_init
+                            .parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
                     ));
                     match migrate_stale_path(&runner, &entry.stale_init_path, &current_init).await {
                         Ok(()) => {

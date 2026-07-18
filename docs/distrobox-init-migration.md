@@ -17,6 +17,28 @@ simply runs `podman start` on the existing container.
 Because the path is fixed, any change to the location (or removal) of the host's
 `distrobox-init` file will break the container.
 
+### Three sibling scripts are bind-mounted, not just `distrobox-init`
+
+Distrobox actually provisions **three** sibling scripts in `hostDir()` (see
+`ProvisionScripts()` in `internal/inside-distrobox/scripts.go`) and bind-mounts
+all of them read-only into every container (see `makeCreateCommand()` in
+`pkg/containermanager/providers/podman.go` and `docker.go`):
+
+| Host script           | In-container destination          |
+|-----------------------|-----------------------------------|
+| `distrobox-init`      | `/usr/bin/entrypoint:ro`          |
+| `distrobox-export`    | `/usr/bin/distrobox-export:ro`    |
+| `distrobox-host-exec` | `/usr/bin/distrobox-host-exec:ro` |
+
+All three sources are baked into the container config at creation time, and all
+three live in the same directory. When that directory disappears, **all three
+sources vanish together**. Repairing only `distrobox-init` lets the entrypoint
+resolve, but the container still cannot invoke `distrobox-export` (used for
+app/binary export) or `distrobox-host-exec` (used to run host commands from
+inside the container) — those bind-mount sources are still missing, so Podman
+either refuses to start or creates empty directories at the destinations. The
+migration must therefore repair every `distrobox-*` sibling in the same pass.
+
 ## Two scenarios where the path becomes stale
 
 ### 1. Upgrading the bundled distrobox (pre‑stable‑path releases)
@@ -154,6 +176,12 @@ When Podman starts the container, it follows the symlink and mounts the new
 init script.  The container's data is untouched, and no recreation is
 necessary.
 
+The same symlink strategy applies to the two sibling scripts
+(`distrobox-export`, `distrobox-host-exec`): since they live alongside
+`distrobox-init` in `hostDir()`, repairing the entrypoint's directory must
+also repair its siblings, or the container will start but fail as soon as it
+tries to invoke them.
+
 ## The porting strategy
 
 When DistroShelf detects that the active `distrobox-init` location has changed
@@ -174,13 +202,34 @@ When DistroShelf detects that the active `distrobox-init` location has changed
 
 4. **If the paths differ**, create the parent directory tree (`mkdir -p`) and
    place a **symlink** at the container's expected path pointing to the
-   current `distrobox-init`:
+   current `distrobox-init`. Then enumerate the current bundle directory
+   (`ls -1`) and place a matching symlink for every other `distrobox-*` file
+   present (e.g. `distrobox-export`, `distrobox-host-exec`, plus any script
+   added by future upstream releases). `ln -sfn` (force, no-dereference) is
+   used so re-running on an already-migrated container is a no-op:
 
    ```
    mkdir -p ~/.local/share/distroshelf/distrobox-1.7.2
-   ln -s ~/.local/share/distroshelf/distrobox-bundled/distrobox-init \
-         ~/.local/share/distroshelf/distrobox-1.7.2/distrobox-init
+   ln -sfn ~/.local/share/distroshelf/distrobox-bundled/distrobox-init \
+           ~/.local/share/distroshelf/distrobox-1.7.2/distrobox-init
+   # for every other distrobox-* entry in the current bundle dir:
+   ln -sfn ~/.local/share/distroshelf/distrobox-bundled/distrobox-export \
+           ~/.local/share/distroshelf/distrobox-1.7.2/distrobox-export
+   ln -sfn ~/.local/share/distroshelf/distrobox-bundled/distrobox-host-exec \
+           ~/.local/share/distroshelf/distrobox-1.7.2/distrobox-host-exec
    ```
+
+   The entrypoint's source is the canonical trigger (its destination is the
+   unique `/usr/bin/entrypoint`), so detection only needs to inspect that one
+   mount. The entrypoint itself is **mandatory**: if its symlink does not
+   resolve after creation, the migration fails (the bundle is broken and must
+   be re-provisioned). The `distrobox-*` prefix is what scopes the sibling
+   repair: it covers every bind-mounted script while excluding both the
+   `distrobox` binary (no trailing hyphen) and the bundled install's
+   `VERSION` marker (DistroShelf-internal, never bind-mounted into
+   containers). The directory listing is the existence proof, so siblings
+   that are absent from a partial bundle are simply not linked — no
+   per-sibling `test -e` is needed.
 
 5. **If the paths match but the file is missing**, this is not a migration
    problem — the init script is absent from its canonical location.  Treat
