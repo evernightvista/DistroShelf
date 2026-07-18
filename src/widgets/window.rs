@@ -505,8 +505,8 @@ impl DistroShelfWindow {
                         let count = list.n_items();
                         if count > 0 {
                             banner.set_title(&ngettext(
-                                "A container points to an outdated Distrobox and needs migration",
-                                "Some containers point to an outdated Distrobox and need migration",
+                                "Container needs migration",
+                                "Containers need migration",
                                 count,
                             ));
                         }
