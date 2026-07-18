@@ -32,7 +32,7 @@ use crate::DistroShelfWindow;
 use crate::backends;
 use crate::backends::DistroboxCommandRunnerResponse;
 use crate::config;
-use crate::fakers::{Command, CommandRunner, NullCommandRunnerBuilder, Settings};
+use crate::fakers::{Command, CommandRunner, FileSystem, NullCommandRunnerBuilder, Settings};
 use crate::models::known_distros;
 use crate::root_store::RootStore;
 
@@ -342,7 +342,14 @@ impl DistroShelfApplication {
             _ => Settings::new_null(),
         };
 
-        let root_store = RootStore::new(command_runner.clone(), settings);
+        // The single file-system instance shared by the whole app. Null
+        // store types use in-memory storage; Real hits the host file system.
+        let file_system = match distrobox_store_ty {
+            DistroboxStoreTy::Real => FileSystem::new_real(),
+            _ => FileSystem::new_null(),
+        };
+
+        let root_store = RootStore::new(command_runner.clone(), settings, file_system);
         root_store.start_background_tasks();
 
         self.set_root_store(root_store);

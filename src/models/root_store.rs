@@ -21,7 +21,7 @@ use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime}
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::distrobox_init_migration::{StaleContainer, current_init_path, migrate_stale_path};
-use crate::fakers::{Command, CommandRunner, FdMode, Settings};
+use crate::fakers::{Command, CommandRunner, FdMode, FileSystem, Settings};
 use crate::gtk_utils::TypedListStore;
 use crate::models::Container;
 use crate::models::ContainerSortKey;
@@ -77,6 +77,7 @@ mod imp {
         pub main_store: RefCell<Option<MainStore>>,
 
         pub settings: RefCell<Settings>,
+        pub file_system: RefCell<FileSystem>,
 
         pub shortcuts: gio::ListStore,
         pub shortcuts_enabled: std::cell::Cell<bool>,
@@ -105,6 +106,7 @@ mod imp {
                 }),
                 terminal_repository: RefCell::new(TerminalRepository::new(
                     CommandRunner::new_null(),
+                    FileSystem::new_null(),
                 )),
                 current_view: Default::default(),
                 current_dialog: Default::default(),
@@ -123,6 +125,7 @@ mod imp {
                 selected_task: Default::default(),
                 bundled_update_available: std::cell::Cell::new(false),
                 settings: RefCell::new(Settings::new_null()),
+                file_system: RefCell::new(FileSystem::new_null()),
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
                 shortcuts_enabled: std::cell::Cell::new(false),
                 main_store: RefCell::new(None),
@@ -193,7 +196,7 @@ enum SelectedTerminalResolution {
 }
 
 impl RootStore {
-    pub fn new(command_runner: CommandRunner, settings: Settings) -> Self {
+    pub fn new(command_runner: CommandRunner, settings: Settings, file_system: FileSystem) -> Self {
         let this: Self = glib::Object::builder().build();
 
         this.imp()
@@ -203,10 +206,11 @@ impl RootStore {
             .unwrap();
 
         this.imp().settings.replace(settings);
+        this.imp().file_system.replace(file_system.clone());
 
         this.imp()
             .terminal_repository
-            .replace(TerminalRepository::new(command_runner.clone()));
+            .replace(TerminalRepository::new(command_runner.clone(), file_system));
 
         let this_clone = this.clone();
         this.terminal_repository()
@@ -567,6 +571,10 @@ impl RootStore {
 
     pub fn settings(&self) -> Settings {
         self.imp().settings.borrow().clone()
+    }
+
+    pub fn file_system(&self) -> FileSystem {
+        self.imp().file_system.borrow().clone()
     }
 
     pub fn terminal_repository(&self) -> TerminalRepository {
@@ -1341,7 +1349,7 @@ mod tests {
                         .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "Command not found"))
                 })
                 .build();
-            let store = RootStore::new(runner, Settings::new_null());
+            let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
             let resolved_path: Result<String, backends::Error> =
                 smol::block_on(store.resolve_host_path(input_path));
@@ -1359,6 +1367,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1387,7 +1396,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store
             .settings()
@@ -1424,7 +1433,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store
             .settings()
@@ -1455,7 +1464,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store
             .settings()
@@ -1496,7 +1505,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store
             .settings()
@@ -1545,7 +1554,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store
             .settings()
@@ -1580,6 +1589,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1605,6 +1615,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1625,6 +1636,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
         let existing_task = DistroboxTask::new("system", "Downloading Distrobox", |_task| async {
             pending::<anyhow::Result<()>>().await
@@ -1642,6 +1654,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         assert_eq!(
@@ -1673,6 +1686,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store.host_distrobox_version().refetch();
@@ -1703,6 +1717,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1743,6 +1758,7 @@ mod tests {
                 )
                 .build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1778,6 +1794,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1828,6 +1845,7 @@ mod tests {
                 .cmd_full_with_status(test_cmd, ExitStatusExt::from_raw(1), || Ok(String::new()))
                 .build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1870,6 +1888,7 @@ mod tests {
                 .cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()))
                 .build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store
@@ -1918,7 +1937,7 @@ mod tests {
             .fallback(ExitStatusExt::from_raw(1))
             .build();
 
-        let store = RootStore::new(runner, Settings::new_null());
+        let store = RootStore::new(runner, Settings::new_null(), FileSystem::new_null());
 
         store.start_background_tasks();
 
@@ -1957,6 +1976,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         assert_eq!(store.current_view(), ViewType::Main);
@@ -1971,6 +1991,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         store.set_current_view(ViewType::Welcome);
@@ -1996,6 +2017,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
 
         let view_count = Rc::new(Cell::new(0u32));
@@ -2024,6 +2046,7 @@ mod tests {
         let store = RootStore::new(
             NullCommandRunnerBuilder::new().build(),
             Settings::new_null(),
+            FileSystem::new_null(),
         );
         let main_before = store.main_store().expect("main_store should exist");
 

@@ -8,7 +8,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use tracing::{error, info, warn};
 
-use crate::fakers::{Command, CommandRunner, FdMode};
+use crate::fakers::{Command, CommandRunner, FdMode, FileSystem};
 use crate::query::Query;
 
 use gtk::subclass::prelude::*;
@@ -109,6 +109,7 @@ mod imp {
         pub list: RefCell<Vec<Terminal>>,
         pub custom_list_path: PathBuf,
         pub command_runner: OnceCell<CommandRunner>,
+        pub file_system: RefCell<FileSystem>,
         pub json_terminals_query: Query<Vec<Terminal>>,
         pub flatpak_terminals_query: Query<Vec<Terminal>>,
     }
@@ -120,6 +121,7 @@ mod imp {
                 list: RefCell::new(vec![]),
                 custom_list_path,
                 command_runner: OnceCell::new(),
+                file_system: RefCell::new(FileSystem::new_null()),
                 json_terminals_query: Query::new("json_terminals".into(), || async { Ok(vec![]) }),
                 flatpak_terminals_query: Query::new("flatpak_terminals".into(), || async {
                     Ok(vec![])
@@ -147,7 +149,7 @@ glib::wrapper! {
 }
 
 impl TerminalRepository {
-    pub fn new(command_runner: CommandRunner) -> Self {
+    pub fn new(command_runner: CommandRunner, file_system: FileSystem) -> Self {
         let this: Self = glib::Object::builder().build();
         this.imp()
             .command_runner
@@ -155,18 +157,22 @@ impl TerminalRepository {
             .map_err(|_| "command runner already set")
             .unwrap();
 
+        this.imp().file_system.replace(file_system);
+
         let mut list = SUPPORTED_TERMINALS.clone();
         list.sort_by(|a, b| a.name.cmp(&b.name));
         this.imp().list.replace(list);
 
         // Set up the json terminals query fetcher
         let custom_list_path = this.imp().custom_list_path.clone();
+        let fs = this.imp().file_system.borrow().clone();
         this.imp().json_terminals_query.set_fetcher(move || {
             let custom_list_path = custom_list_path.clone();
+            let fs = fs.clone();
             async move {
-                match Self::load_terminals_from_json(&custom_list_path) {
+                match Self::load_terminals_from_json(&fs, &custom_list_path) {
                     Ok(terminals) => Ok(terminals),
-                    Err(_e) if !custom_list_path.exists() => Ok(vec![]),
+                    Err(_e) if !fs.exists(&custom_list_path) => Ok(vec![]),
                     Err(e) => {
                         warn!(
                             "Failed to load custom terminals from JSON file {:?}: {}",
@@ -337,7 +343,8 @@ impl TerminalRepository {
 
         match serde_json::to_string(&list) {
             Ok(json) => {
-                if let Err(e) = std::fs::write(&self.imp().custom_list_path, json) {
+                let fs = self.imp().file_system.borrow();
+                if let Err(e) = fs.write(&self.imp().custom_list_path, &json) {
                     error!(
                         "Failed to write custom terminals to {:?}: {}",
                         &self.imp().custom_list_path,
@@ -351,8 +358,8 @@ impl TerminalRepository {
         }
     }
 
-    fn load_terminals_from_json(path: &Path) -> anyhow::Result<Vec<Terminal>> {
-        let data = std::fs::read_to_string(path)?;
+    fn load_terminals_from_json(fs: &FileSystem, path: &Path) -> anyhow::Result<Vec<Terminal>> {
+        let data = fs.read_to_string(path)?;
         let list: Vec<Terminal> = serde_json::from_str(&data)?;
         Ok(list)
     }
@@ -401,6 +408,6 @@ impl TerminalRepository {
 
 impl Default for TerminalRepository {
     fn default() -> Self {
-        Self::new(CommandRunner::default())
+        Self::new(CommandRunner::default(), FileSystem::new_null())
     }
 }

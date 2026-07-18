@@ -11,7 +11,7 @@ use vte4::prelude::*;
 use crate::i18n::gettext;
 use crate::widgets::DistroShelfWindow;
 use crate::{
-    fakers::{CommandRunner, Settings},
+    fakers::{CommandRunner, FileSystem, Settings},
     gtk_utils::ColorPalette,
     models::RootStore,
 };
@@ -77,7 +77,11 @@ impl Default for IntegratedTerminal {
             .property("container_name", "default")
             .property(
                 "root_store",
-                RootStore::new(CommandRunner::new_null(), Settings::new_null()),
+                RootStore::new(
+                    CommandRunner::new_null(),
+                    Settings::new_null(),
+                    FileSystem::new_null(),
+                ),
             )
             .build();
         obj
