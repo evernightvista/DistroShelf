@@ -306,6 +306,7 @@ impl RootStore {
         this.container_runtime().connect_success(move |_runtime| {
             if let Some(main) = this_clone.main_store() {
                 main.check_stale_containers();
+                main.load_containers();
             }
         });
 

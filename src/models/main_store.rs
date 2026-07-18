@@ -289,6 +289,9 @@ impl MainStore {
                         "last-used-date",
                     ],
                 );
+                if let Some(sorter) = main.imp().containers_sorter.get() {
+                    sorter.changed(gtk::SorterChange::Different);
+                }
             });
         }
 
