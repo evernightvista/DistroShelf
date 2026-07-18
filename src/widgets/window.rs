@@ -125,6 +125,23 @@ impl DistroShelfWindow {
             .property("application", application)
             .property("root-store", root_store)
             .build();
+        this.setup();
+        this
+    }
+
+    /// Builds the window without attaching it to a `GtkApplication`.
+    /// Used by end-to-end tests, where no application main loop is running.
+    #[cfg(test)]
+    pub fn new_unattached(root_store: RootStore) -> Self {
+        let this: Self = glib::Object::builder()
+            .property("root-store", root_store)
+            .build();
+        this.setup();
+        this
+    }
+
+    fn setup(&self) {
+        let this = self.clone();
 
         // Restore window size from settings
         let settings = this.root_store().settings();
@@ -231,8 +248,6 @@ impl DistroShelfWindow {
             let _ = settings.set_int("window-height", height);
             glib::Propagation::Proceed
         });
-
-        this
     }
 
     /// (Re-)binds sidebar, selection tracking, stale-banner, and focus refetch

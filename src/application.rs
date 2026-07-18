@@ -47,6 +47,114 @@ pub enum DistroboxStoreTy {
     NullHostAndBundledWorking,
 }
 
+/// Path reported for the host distrobox by the null command runners.
+pub const NULL_HOST_DISTROBOX_PATH: &str = "/usr/bin/distrobox";
+
+impl DistroboxStoreTy {
+    /// Predefined `CommandRunner` for the null store types, used by UI
+    /// previews and end-to-end tests. Returns `None` for [`Self::Real`].
+    pub fn null_command_runner(self) -> Option<CommandRunner> {
+        let mut builder = NullCommandRunnerBuilder::new();
+        match self {
+            DistroboxStoreTy::Real => return None,
+            DistroboxStoreTy::NullHostWorking => {
+                Self::add_distrobox_responses(
+                    &mut builder,
+                    &[
+                        DistroboxCommandRunnerResponse::Version,
+                        DistroboxCommandRunnerResponse::new_list_common_distros(),
+                        DistroboxCommandRunnerResponse::new_common_images(),
+                        DistroboxCommandRunnerResponse::new_common_exported_apps(),
+                    ],
+                );
+                Self::add_host_distrobox_path(&mut builder);
+                Self::add_podman(&mut builder);
+                // Make unmatched commands (test -e, etc.) fail so bundled
+                // distrobox does not appear to be installed.
+                builder.fallback(ExitStatus::from_raw(1));
+            }
+            DistroboxStoreTy::NullEmpty => {
+                Self::add_distrobox_responses(
+                    &mut builder,
+                    &[
+                        DistroboxCommandRunnerResponse::Version,
+                        DistroboxCommandRunnerResponse::List(vec![]),
+                        DistroboxCommandRunnerResponse::new_common_images(),
+                    ],
+                );
+                Self::add_host_distrobox_path(&mut builder);
+                Self::add_podman(&mut builder);
+                builder.fallback(ExitStatus::from_raw(1));
+            }
+            DistroboxStoreTy::NullNoVersion => {
+                Self::add_distrobox_responses(
+                    &mut builder,
+                    &[DistroboxCommandRunnerResponse::NoVersion],
+                );
+                // Unmatched commands (test -e, command -v, etc.) should fail
+                // so that both host and bundled distrobox appear unavailable.
+                builder.fallback(ExitStatus::from_raw(1));
+            }
+            DistroboxStoreTy::NullHostAndBundledWorking => {
+                Self::add_distrobox_responses(
+                    &mut builder,
+                    &[
+                        DistroboxCommandRunnerResponse::Version,
+                        DistroboxCommandRunnerResponse::new_list_common_distros(),
+                        DistroboxCommandRunnerResponse::new_common_images(),
+                        DistroboxCommandRunnerResponse::new_common_exported_apps(),
+                    ],
+                );
+                Self::add_host_distrobox_path(&mut builder);
+                Self::add_podman(&mut builder);
+                // Make bundled distrobox appear installed.
+                let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
+                let mut test_cmd = Command::new("test");
+                test_cmd.arg("-e").arg(&bundled_path);
+                builder.cmd_full(test_cmd, || Ok(String::new()));
+                let mut version_cmd = Command::new(&bundled_path);
+                version_cmd.arg("version");
+                builder.cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()));
+                builder.fallback(ExitStatus::from_raw(1));
+            }
+        }
+        Some(builder.build())
+    }
+
+    /// Registers each distrobox response twice: under the bare `distrobox`
+    /// program used before the executable is resolved, and under
+    /// [`NULL_HOST_DISTROBOX_PATH`] used after the host path resolves.
+    fn add_distrobox_responses(
+        builder: &mut NullCommandRunnerBuilder,
+        responses: &[DistroboxCommandRunnerResponse],
+    ) {
+        for res in responses {
+            for (cmd, out) in res.clone().into_commands() {
+                if cmd.program == "distrobox" {
+                    let mut resolved_cmd = cmd.clone();
+                    resolved_cmd.program = NULL_HOST_DISTROBOX_PATH.into();
+                    let out = out.clone();
+                    builder.cmd_full(resolved_cmd, move || out());
+                }
+                builder.cmd_full(cmd, move || out());
+            }
+        }
+    }
+
+    fn add_host_distrobox_path(builder: &mut NullCommandRunnerBuilder) {
+        builder.cmd_full(
+            Command::new_with_args("sh", ["-c", "command -v distrobox"]),
+            || Ok(NULL_HOST_DISTROBOX_PATH.to_string()),
+        );
+    }
+
+    fn add_podman(builder: &mut NullCommandRunnerBuilder) {
+        builder.cmd_full(Command::new_with_args("podman", ["--version"]), || {
+            Ok("podman version 4.9.3".to_string())
+        });
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -215,94 +323,14 @@ impl DistroShelfApplication {
 
     fn recreate_window(&self) -> adw::ApplicationWindow {
         let distrobox_store_ty = self.imp().distrobox_store_ty.borrow().to_owned();
-        let command_runner = match distrobox_store_ty {
-            DistroboxStoreTy::NullHostWorking => {
-                let mut builder = NullCommandRunnerBuilder::new();
-                for res in &[
-                    DistroboxCommandRunnerResponse::Version,
-                    DistroboxCommandRunnerResponse::new_list_common_distros(),
-                    DistroboxCommandRunnerResponse::new_common_images(),
-                    DistroboxCommandRunnerResponse::new_common_exported_apps(),
-                ] {
-                    for (cmd, out) in res.clone().into_commands() {
-                        builder.cmd_full(cmd, move || out());
-                    }
-                }
-                builder.cmd_full(
-                    Command::new_with_args("sh", ["-c", "command -v distrobox"]),
-                    || Ok("/usr/bin/distrobox".to_string()),
-                );
-                // Make unmatched commands (test -e, etc.) fail so bundled
-                // distrobox does not appear to be installed.
-                builder.fallback(ExitStatus::from_raw(1));
-                builder.build()
+        let command_runner = distrobox_store_ty.null_command_runner().unwrap_or_else(|| {
+            let command_runner = CommandRunner::new_real();
+            if Self::get_is_in_flatpak() {
+                command_runner.map_cmd(backends::flatpak::map_flatpak_spawn_host)
+            } else {
+                command_runner
             }
-            DistroboxStoreTy::NullEmpty => {
-                let mut builder = NullCommandRunnerBuilder::new();
-                for res in &[
-                    DistroboxCommandRunnerResponse::Version,
-                    DistroboxCommandRunnerResponse::List(vec![]),
-                    DistroboxCommandRunnerResponse::new_common_images(),
-                ] {
-                    for (cmd, out) in res.clone().into_commands() {
-                        builder.cmd_full(cmd, move || out());
-                    }
-                }
-                builder.cmd_full(
-                    Command::new_with_args("sh", ["-c", "command -v distrobox"]),
-                    || Ok("/usr/bin/distrobox".to_string()),
-                );
-                builder.fallback(ExitStatus::from_raw(1));
-                builder.build()
-            }
-            DistroboxStoreTy::NullNoVersion => {
-                let mut builder = NullCommandRunnerBuilder::new();
-                for res in &[DistroboxCommandRunnerResponse::NoVersion] {
-                    for (cmd, out) in res.clone().into_commands() {
-                        builder.cmd_full(cmd, move || out());
-                    }
-                }
-                // Unmatched commands (test -e, command -v, etc.) should fail
-                // so that both host and bundled distrobox appear unavailable.
-                builder.fallback(ExitStatus::from_raw(1));
-                builder.build()
-            }
-            DistroboxStoreTy::NullHostAndBundledWorking => {
-                let mut builder = NullCommandRunnerBuilder::new();
-                for res in &[
-                    DistroboxCommandRunnerResponse::Version,
-                    DistroboxCommandRunnerResponse::new_list_common_distros(),
-                    DistroboxCommandRunnerResponse::new_common_images(),
-                    DistroboxCommandRunnerResponse::new_common_exported_apps(),
-                ] {
-                    for (cmd, out) in res.clone().into_commands() {
-                        builder.cmd_full(cmd, move || out());
-                    }
-                }
-                builder.cmd_full(
-                    Command::new_with_args("sh", ["-c", "command -v distrobox"]),
-                    || Ok("/usr/bin/distrobox".to_string()),
-                );
-                // Make bundled distrobox appear installed.
-                let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
-                let mut test_cmd = Command::new("test");
-                test_cmd.arg("-e").arg(&bundled_path);
-                builder.cmd_full(test_cmd, || Ok(String::new()));
-                let mut version_cmd = Command::new(&bundled_path);
-                version_cmd.arg("version");
-                builder.cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()));
-                builder.fallback(ExitStatus::from_raw(1));
-                builder.build()
-            }
-            _ => {
-                let command_runner = CommandRunner::new_real();
-                if Self::get_is_in_flatpak() {
-                    command_runner.map_cmd(backends::flatpak::map_flatpak_spawn_host)
-                } else {
-                    command_runner
-                }
-            }
-        };
+        });
 
         command_runner.output_tracker().enable();
 
