@@ -94,10 +94,10 @@ mod imp {
                         let item: &DistroboxTask = item.and_downcast_ref().unwrap();
                         let weak = this_clone.downgrade();
                         item.connect_status_notify(move |item| {
-                            if let Some(clone) = weak.upgrade() {
-                                if item.is_failed() {
-                                    clone.set_has_warning(true);
-                                }
+                            if let Some(clone) = weak.upgrade()
+                                && item.is_failed()
+                            {
+                                clone.set_has_warning(true);
                             }
                         });
                     }

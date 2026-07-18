@@ -366,7 +366,7 @@ impl DistroShelfWindow {
                 if let Some(v) = param {
                     let s: String = v.get().unwrap();
                     if let Some(key) = ContainerSortKey::from_str(&s) {
-                        action.change_state(&v);
+                        action.change_state(v);
                         if let Some(main) = this.root_store().main_store() {
                             main.set_containers_sort_key(key);
                         }
@@ -408,10 +408,10 @@ impl DistroShelfWindow {
         // Sync the current sort key from main_store immediately, in case
         // the initial main-store notification was emitted before this
         // handler was registered.
-        if let Some(main) = self.root_store().main_store() {
-            if let Some(action) = self.lookup_action("sort-key") {
-                action.change_state(&main.containers_sort_key().to_str().to_variant());
-            }
+        if let Some(main) = self.root_store().main_store()
+            && let Some(action) = self.lookup_action("sort-key")
+        {
+            action.change_state(&main.containers_sort_key().to_str().to_variant());
         }
     }
 

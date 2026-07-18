@@ -2,9 +2,9 @@ use futures::StreamExt;
 use futures::TryFutureExt;
 use glib::Properties;
 use glib::subclass::prelude::*;
+use gtk::gio;
 use gtk::glib;
 use gtk::glib::clone;
-use gtk::gio;
 use gtk::prelude::*;
 use std::cell::OnceCell;
 use std::cell::RefCell;
@@ -117,7 +117,7 @@ impl MainStore {
                         !exe.path().is_empty(),
                         "resolved distrobox path must not be empty"
                     );
-                    return Command::new(exe.path().to_owned());
+                    return Command::new(exe.path());
                 }
                 tracing::warn!("distrobox_version not ready; falling back to bare 'distrobox'");
                 Command::new("distrobox")
@@ -189,7 +189,9 @@ impl MainStore {
         ));
 
         this.connect_containers_sort_key_notify(move |obj| {
-            let _ = obj.settings().set_string("sort-key", obj.containers_sort_key().to_str());
+            let _ = obj
+                .settings()
+                .set_string("sort-key", obj.containers_sort_key().to_str());
         });
 
         this.imp()
@@ -252,7 +254,7 @@ impl MainStore {
                     if let Some(detected) = runtime_query.data() {
                         match detected.runtime.inspect_containers(&ids).await {
                             Ok(inspected) => {
-                                for (_name, info) in containers.iter_mut() {
+                                for info in containers.values_mut() {
                                     if let Some(inspect_info) = inspected.get(&info.id) {
                                         info.created_at = inspect_info.created_at.clone();
                                         info.last_used_at =
@@ -612,7 +614,13 @@ mod tests {
             container_info("1", "Ubuntu", None, None),
             container_info("2", "Fedora", None, None),
         ])]);
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
+        let store = MainStore::new(
+            runner,
+            no_runtime_query(),
+            version_query("distrobox"),
+            ContainerSortKey::default(),
+            test_settings(),
+        );
 
         store.load_containers();
         spin_main_context_until(Duration::from_secs(5), || {
@@ -643,7 +651,13 @@ mod tests {
                 )
                 .build()
         };
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
+        let store = MainStore::new(
+            runner,
+            no_runtime_query(),
+            version_query("distrobox"),
+            ContainerSortKey::default(),
+            test_settings(),
+        );
 
         store.load_containers();
         spin_main_context_until(Duration::from_secs(5), || {
@@ -759,7 +773,13 @@ mod tests {
             container_info("1", "Ubuntu", None, None),
             container_info("2", "Fedora", None, None),
         ])]);
-        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"), ContainerSortKey::default(), test_settings());
+        let store = MainStore::new(
+            runner,
+            no_runtime_query(),
+            version_query("distrobox"),
+            ContainerSortKey::default(),
+            test_settings(),
+        );
 
         assert!(store.selected_container().is_none());
         assert!(store.selected_container_name().is_none());

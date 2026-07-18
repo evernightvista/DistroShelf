@@ -277,11 +277,14 @@ impl RootStore {
             } else {
                 let source = this_clone.distrobox_source();
                 debug_assert!(
-                    match (&exe, source) {
-                        (Some(DistroboxExecutable::Host(_)), DistroboxSource::Host) => true,
-                        (Some(DistroboxExecutable::Bundled(_)), DistroboxSource::Bundled) => true,
-                        _ => false,
-                    },
+                    matches!(
+                        (&exe, source),
+                        (Some(DistroboxExecutable::Host(_)), DistroboxSource::Host)
+                            | (
+                                Some(DistroboxExecutable::Bundled(_)),
+                                DistroboxSource::Bundled
+                            )
+                    ),
                     "distrobox_version variant must match selected_source"
                 );
             }
@@ -410,8 +413,7 @@ impl RootStore {
 
         // Create MainStore and set initial view to Main (optimistic start)
         let settings = this.settings();
-        let sort_key = ContainerSortKey::from_str(&settings.string("sort-key"))
-            .unwrap_or_default();
+        let sort_key = ContainerSortKey::from_str(&settings.string("sort-key")).unwrap_or_default();
         let main_store = MainStore::new(
             command_runner.clone(),
             this.container_runtime(),
@@ -621,9 +623,7 @@ impl RootStore {
     /// are skipped (stop them and re-run). Returns the task so the caller
     /// can display it.
     pub fn migrate_stale_containers(&self) -> Option<DistroboxTask> {
-        let Some(main) = self.main_store() else {
-            return None;
-        };
+        let main = self.main_store()?;
 
         // Guard: if a migration task is already in progress, return it
         for task in self.tasks().iter() {
@@ -738,13 +738,13 @@ impl RootStore {
     }
 
     pub fn update_bundled_update_available(&self) {
-        if self.distrobox_source() == DistroboxSource::Bundled {
-            if let Some(Some(installed)) = self.bundled_distrobox_version().data() {
-                let available =
-                    crate::distrobox_downloader::is_bundled_update_available(&installed.version);
-                self.set_bundled_update_available(available);
-                return;
-            }
+        if self.distrobox_source() == DistroboxSource::Bundled
+            && let Some(Some(installed)) = self.bundled_distrobox_version().data()
+        {
+            let available =
+                crate::distrobox_downloader::is_bundled_update_available(&installed.version);
+            self.set_bundled_update_available(available);
+            return;
         }
         self.set_bundled_update_available(false);
     }
