@@ -45,6 +45,9 @@ pub enum DistroboxStoreTy {
     NullEmpty,
     NullNoVersion,
     NullHostAndBundledWorking,
+    /// No host distrobox, but a previously downloaded bundled distrobox
+    /// is installed and working.
+    NullBundledOnly,
 }
 
 /// Path reported for the host distrobox by the null command runners.
@@ -58,7 +61,7 @@ impl DistroboxStoreTy {
         match self {
             DistroboxStoreTy::Real => return None,
             DistroboxStoreTy::NullHostWorking => {
-                Self::add_distrobox_responses(
+                Self::add_host_distrobox_responses(
                     &mut builder,
                     &[
                         DistroboxCommandRunnerResponse::Version,
@@ -69,12 +72,13 @@ impl DistroboxStoreTy {
                 );
                 Self::add_host_distrobox_path(&mut builder);
                 Self::add_podman(&mut builder);
+                Self::add_terminal(&mut builder);
                 // Make unmatched commands (test -e, etc.) fail so bundled
                 // distrobox does not appear to be installed.
                 builder.fallback(ExitStatus::from_raw(1));
             }
             DistroboxStoreTy::NullEmpty => {
-                Self::add_distrobox_responses(
+                Self::add_host_distrobox_responses(
                     &mut builder,
                     &[
                         DistroboxCommandRunnerResponse::Version,
@@ -84,10 +88,11 @@ impl DistroboxStoreTy {
                 );
                 Self::add_host_distrobox_path(&mut builder);
                 Self::add_podman(&mut builder);
+                Self::add_terminal(&mut builder);
                 builder.fallback(ExitStatus::from_raw(1));
             }
             DistroboxStoreTy::NullNoVersion => {
-                Self::add_distrobox_responses(
+                Self::add_host_distrobox_responses(
                     &mut builder,
                     &[DistroboxCommandRunnerResponse::NoVersion],
                 );
@@ -96,7 +101,7 @@ impl DistroboxStoreTy {
                 builder.fallback(ExitStatus::from_raw(1));
             }
             DistroboxStoreTy::NullHostAndBundledWorking => {
-                Self::add_distrobox_responses(
+                Self::add_host_distrobox_responses(
                     &mut builder,
                     &[
                         DistroboxCommandRunnerResponse::Version,
@@ -107,34 +112,67 @@ impl DistroboxStoreTy {
                 );
                 Self::add_host_distrobox_path(&mut builder);
                 Self::add_podman(&mut builder);
-                // Make bundled distrobox appear installed.
+                Self::add_terminal(&mut builder);
+                Self::add_installed_bundled_distrobox(&mut builder);
+                builder.fallback(ExitStatus::from_raw(1));
+            }
+            DistroboxStoreTy::NullBundledOnly => {
+                // No host distrobox: `distrobox version` and
+                // `command -v distrobox` fail through the fallback.
                 let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
-                let mut test_cmd = Command::new("test");
-                test_cmd.arg("-e").arg(&bundled_path);
-                builder.cmd_full(test_cmd, || Ok(String::new()));
-                let mut version_cmd = Command::new(&bundled_path);
-                version_cmd.arg("version");
-                builder.cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()));
+                Self::add_distrobox_responses_as(
+                    &mut builder,
+                    &bundled_path.to_string_lossy(),
+                    &[
+                        DistroboxCommandRunnerResponse::new_list_common_distros(),
+                        DistroboxCommandRunnerResponse::new_common_images(),
+                        DistroboxCommandRunnerResponse::new_common_exported_apps(),
+                    ],
+                );
+                Self::add_installed_bundled_distrobox(&mut builder);
+                Self::add_podman(&mut builder);
+                Self::add_terminal(&mut builder);
                 builder.fallback(ExitStatus::from_raw(1));
             }
         }
         Some(builder.build())
     }
 
+    /// Registers each distrobox response, rewriting the `distrobox` program
+    /// to `program`. Non-distrobox helper commands included in a response
+    /// (e.g. `printenv`) are registered unchanged.
+    fn add_distrobox_responses_as(
+        builder: &mut NullCommandRunnerBuilder,
+        program: &str,
+        responses: &[DistroboxCommandRunnerResponse],
+    ) {
+        Self::add_distrobox_responses_filtered(builder, program, responses, false);
+    }
+
     /// Registers each distrobox response twice: under the bare `distrobox`
     /// program used before the executable is resolved, and under
     /// [`NULL_HOST_DISTROBOX_PATH`] used after the host path resolves.
-    fn add_distrobox_responses(
+    /// Program-independent helper commands are registered only once.
+    fn add_host_distrobox_responses(
         builder: &mut NullCommandRunnerBuilder,
         responses: &[DistroboxCommandRunnerResponse],
     ) {
+        Self::add_distrobox_responses_filtered(builder, "distrobox", responses, false);
+        Self::add_distrobox_responses_filtered(builder, NULL_HOST_DISTROBOX_PATH, responses, true);
+    }
+
+    fn add_distrobox_responses_filtered(
+        builder: &mut NullCommandRunnerBuilder,
+        program: &str,
+        responses: &[DistroboxCommandRunnerResponse],
+        only_distrobox_commands: bool,
+    ) {
         for res in responses {
-            for (cmd, out) in res.clone().into_commands() {
+            for (mut cmd, out) in res.clone().into_commands() {
                 if cmd.program == "distrobox" {
-                    let mut resolved_cmd = cmd.clone();
-                    resolved_cmd.program = NULL_HOST_DISTROBOX_PATH.into();
-                    let out = out.clone();
-                    builder.cmd_full(resolved_cmd, move || out());
+                    cmd.program = program.into();
+                } else if only_distrobox_commands {
+                    continue;
                 }
                 builder.cmd_full(cmd, move || out());
             }
@@ -148,10 +186,46 @@ impl DistroboxStoreTy {
         );
     }
 
+    /// Makes the bundled distrobox appear installed and working.
+    fn add_installed_bundled_distrobox(builder: &mut NullCommandRunnerBuilder) {
+        let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
+        let mut test_cmd = Command::new("test");
+        test_cmd.arg("-e").arg(&bundled_path);
+        builder.cmd_full(test_cmd, || Ok(String::new()));
+        let mut version_cmd = Command::new(&bundled_path);
+        version_cmd.arg("version");
+        builder.cmd_full(version_cmd, || {
+            Ok(format!(
+                "distrobox: {}",
+                crate::distrobox_downloader::DISTROBOX_VERSION
+            ))
+        });
+    }
+
     fn add_podman(builder: &mut NullCommandRunnerBuilder) {
         builder.cmd_full(Command::new_with_args("podman", ["--version"]), || {
             Ok("podman version 4.9.3".to_string())
         });
+    }
+
+    /// Makes GNOME Console (kgx) the desktop default terminal and lets the
+    /// terminal validation run succeed.
+    fn add_terminal(builder: &mut NullCommandRunnerBuilder) {
+        builder.cmd_full(
+            Command::new_with_args(
+                "gsettings",
+                [
+                    "get",
+                    "org.gnome.desktop.default-applications.terminal",
+                    "exec",
+                ],
+            ),
+            || Ok("'kgx'".to_string()),
+        );
+        builder.cmd_full(
+            Command::new_with_args("kgx", ["--", "echo", "DistroShelf terminal validation"]),
+            || Ok(String::new()),
+        );
     }
 }
 

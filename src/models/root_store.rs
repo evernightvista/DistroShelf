@@ -171,7 +171,11 @@ mod imp {
                             sort_key,
                             settings,
                         );
-                        *self.main_store.borrow_mut() = Some(main);
+                        *self.main_store.borrow_mut() = Some(main.clone());
+                        // A store created for this view switch starts empty
+                        // (e.g. entering Main after completing the welcome
+                        // flow): populate it right away.
+                        main.load_containers();
                     }
                 }
                 ViewType::Welcome => {
