@@ -191,8 +191,11 @@ mod imp {
             // Add pages to view stack
             self.view_stack
                 .add_titled(&guided_page, Some("create"), &gettext("Guided"));
-            self.view_stack
-                .add_titled(&assemble_page, Some("assemble-file"), &gettext("From File"));
+            self.view_stack.add_titled(
+                &assemble_page,
+                Some("assemble-file"),
+                &gettext("From File"),
+            );
             self.view_stack
                 .add_titled(&url_page, Some("assemble-url"), &gettext("From URL"));
 
@@ -268,7 +271,9 @@ impl CreateDistroboxDialog {
             .property("clone-src", clone_src)
             .build();
 
-        let main_store = this.root_store().main_store()
+        let main_store = this
+            .root_store()
+            .main_store()
             .expect("CreateDistroboxDialog requires Main view");
         main_store.images_query().connect_success(clone!(
             #[weak]
@@ -1111,7 +1116,11 @@ impl CreateDistroboxDialog {
         }
         let name = match CreateArgName::new(&imp.name_row.text()) {
             Ok(name) => {
-                if let Some(containers) = self.root_store().main_store().map(|m| m.containers().clone()) {
+                if let Some(containers) = self
+                    .root_store()
+                    .main_store()
+                    .map(|m| m.containers().clone())
+                {
                     for container in containers.iter() {
                         if container.name() == imp.name_row.text() {
                             errors.add_name_error(format!(

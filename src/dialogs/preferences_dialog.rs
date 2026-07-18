@@ -227,8 +227,7 @@ mod imp {
                 obj,
                 move |_| {
                     obj.root_store().download_distrobox();
-                    obj.root_store()
-                        .set_current_dialog(DialogType::TaskManager);
+                    obj.root_store().set_current_dialog(DialogType::TaskManager);
                 }
             ));
             bundled_row.add_suffix(&update_btn);
@@ -360,9 +359,7 @@ impl PreferencesDialog {
         let query = self.root_store().host_distrobox_version();
         let (subtitle, has_version) = match query.last_fetch() {
             LastFetch::Success => match query.data() {
-                Some(Some(info)) => {
-                    (format!("{} · {}", info.version, info.path), true)
-                }
+                Some(Some(info)) => (format!("{} · {}", info.version, info.path), true),
                 _ => (gettext("Not available on this system"), false),
             },
             LastFetch::Error => (gettext("Not available on this system"), false),
@@ -414,8 +411,10 @@ impl PreferencesDialog {
 
         imp.bundled_menu_model.remove_all();
         if !is_installed {
-            imp.bundled_menu_model
-                .append(Some(&gettext("Download")), Some("dialog.download-distrobox"));
+            imp.bundled_menu_model.append(
+                Some(&gettext("Download")),
+                Some("dialog.download-distrobox"),
+            );
         } else {
             imp.bundled_menu_model.append(
                 Some(&gettext("Re-download")),

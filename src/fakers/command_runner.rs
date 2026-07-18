@@ -217,10 +217,13 @@ impl NullCommandRunnerBuilder {
         out: impl Fn() -> Result<String, io::Error> + 'static,
     ) -> &mut Self {
         let key = NullCommandRunner::key_for_cmd(&cmd);
-        self.responses.insert(key, Rc::new(move || {
-            let s = out()?;
-            Ok((s, status))
-        }));
+        self.responses.insert(
+            key,
+            Rc::new(move || {
+                let s = out()?;
+                Ok((s, status))
+            }),
+        );
         self
     }
     #[allow(dead_code)]

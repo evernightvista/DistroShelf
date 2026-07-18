@@ -196,7 +196,8 @@ impl DistroShelfWindow {
 
         // Refresh data when the window regains focus
         if let Some(m) = this.root_store().main_store() {
-            m.containers_query().refetch_on_focus(&this, Duration::from_secs(5));
+            m.containers_query()
+                .refetch_on_focus(&this, Duration::from_secs(5));
         }
         this.root_store()
             .container_runtime()
@@ -242,17 +243,14 @@ impl DistroShelfWindow {
 
         let Some(main) = root_store.main_store() else {
             // No main store — clear the sidebar model
-            imp.sidebar_list_view
-                .set_model(None::<&gtk::NoSelection>);
-            imp.content_state_stack
-                .set_visible_child_name("no_content");
+            imp.sidebar_list_view.set_model(None::<&gtk::NoSelection>);
+            imp.content_state_stack.set_visible_child_name("no_content");
             return;
         };
 
         // Bind sidebar to MainStore's selection model
         let sel_model = main.selected_container_model();
-        imp.sidebar_list_view
-            .set_model(Some(&sel_model));
+        imp.sidebar_list_view.set_model(Some(&sel_model));
 
         let this_clone = self.clone();
         sel_model.connect_selected_item_notify(move |model| {
@@ -275,9 +273,8 @@ impl DistroShelfWindow {
 
         // Toggle sidebar stack based on container count
         let this_clone = self.clone();
-        main.containers()
-            .inner()
-            .connect_items_changed(move |list, _position, _removed, _added| {
+        main.containers().inner().connect_items_changed(
+            move |list, _position, _removed, _added| {
                 let visible_child_name = if list.n_items() == 0 {
                     "no-distroboxes"
                 } else {
@@ -287,7 +284,8 @@ impl DistroShelfWindow {
                     .imp()
                     .sidebar_stack
                     .set_visible_child_name(visible_child_name);
-            });
+            },
+        );
     }
 
     fn setup_gactions(&self) {
@@ -391,7 +389,10 @@ impl DistroShelfWindow {
                     });
                     // Store handler so it lives as long as the window
                     // (old handler auto-disconnects when old MainStore drops)
-                    this_clone.imp().sort_key_handler_id.replace(Some(handler_id));
+                    this_clone
+                        .imp()
+                        .sort_key_handler_id
+                        .replace(Some(handler_id));
                 }
             });
     }
@@ -522,13 +523,14 @@ impl DistroShelfWindow {
 
         // Re-bind when main_store changes
         let banner_for_notify = banner.clone();
-        self.root_store().connect_main_store_notify(move |root_store| {
-            if let Some(main) = root_store.main_store() {
-                connect_stale(&banner_for_notify, &main);
-            } else {
-                banner_for_notify.set_revealed(false);
-            }
-        });
+        self.root_store()
+            .connect_main_store_notify(move |root_store| {
+                if let Some(main) = root_store.main_store() {
+                    connect_stale(&banner_for_notify, &main);
+                } else {
+                    banner_for_notify.set_revealed(false);
+                }
+            });
 
         banner.connect_button_clicked(clone!(
             #[weak(rename_to = this)]

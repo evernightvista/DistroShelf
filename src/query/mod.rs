@@ -471,10 +471,7 @@ where
         }
     }
 
-    pub fn set_retry_strategy(
-        &self,
-        retry_strategy: impl Fn(u32) -> Option<Duration> + 'static,
-    ) {
+    pub fn set_retry_strategy(&self, retry_strategy: impl Fn(u32) -> Option<Duration> + 'static) {
         self.inner.borrow_mut().retry_strategy = Some(Box::new(retry_strategy));
     }
 
@@ -866,10 +863,7 @@ where
     ///
     /// The derived query uses `supply` internally, so inner-query successes are
     /// pushed to the derived query synchronously (no loading flicker).
-    pub fn switch_map<U: Clone + 'static>(
-        &self,
-        f: impl Fn(&T) -> Query<U> + 'static,
-    ) -> Query<U> {
+    pub fn switch_map<U: Clone + 'static>(&self, f: impl Fn(&T) -> Query<U> + 'static) -> Query<U> {
         type InnerEntry<U> = (Query<U>, glib::SignalHandlerId);
         let source = self.clone();
         let f = Rc::new(f);
@@ -880,8 +874,7 @@ where
         });
         let derived_weak = Rc::downgrade(&derived_query.inner);
 
-        let current: Rc<RefCell<Option<InnerEntry<U>>>> =
-            Rc::new(RefCell::new(None));
+        let current: Rc<RefCell<Option<InnerEntry<U>>>> = Rc::new(RefCell::new(None));
 
         let switch = {
             let source_key = { self.inner.borrow().key.clone() };
@@ -894,19 +887,18 @@ where
                 let new_inner_weak = Rc::downgrade(&new_inner.inner);
                 let dw = derived_weak.clone();
                 let handler_id =
-                    new_inner.inner.borrow().query_obj.connect_local(
-                        "success",
-                        false,
-                        move |_| {
-                            if let (Some(ni), Some(di)) =
-                                (new_inner_weak.upgrade(), dw.upgrade())
+                    new_inner
+                        .inner
+                        .borrow()
+                        .query_obj
+                        .connect_local("success", false, move |_| {
+                            if let (Some(ni), Some(di)) = (new_inner_weak.upgrade(), dw.upgrade())
                                 && let Some(d) = &ni.borrow().data
                             {
                                 Query { inner: di }.supply(d.clone());
                             }
                             None
-                        },
-                    );
+                        });
 
                 // If the inner query was synchronous (e.g. Query::pure),
                 // its success signal already fired before we connected.
@@ -933,10 +925,11 @@ where
         let source_key = { self.inner.borrow().key.clone() };
         let switch_closure = switch.clone();
         let source_key_for_closure = source_key.clone();
-        source.inner.borrow().query_obj.connect_local(
-            "success",
-            false,
-            move |_| {
+        source
+            .inner
+            .borrow()
+            .query_obj
+            .connect_local("success", false, move |_| {
                 if let Some(inner) = source_weak.upgrade()
                     && let Some(data) = &inner.borrow().data
                 {
@@ -947,8 +940,7 @@ where
                     switch_closure(data);
                 }
                 None
-            },
-        );
+            });
 
         if let Some(data) = source.data() {
             debug!(
@@ -1291,8 +1283,8 @@ mod tests {
 
     #[gtk::test]
     fn test_switch_map_refetch_cascades_to_source() {
-        use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let fetch_count = Arc::new(AtomicU32::new(0));
         let fc = fetch_count.clone();

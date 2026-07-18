@@ -40,9 +40,7 @@ pub struct ContainerInspectInfo {
 
 impl ContainerInspectInfo {
     pub fn last_used_at(&self) -> Option<&str> {
-        self.finished_at
-            .as_deref()
-            .or(self.started_at.as_deref())
+        self.finished_at.as_deref().or(self.started_at.as_deref())
     }
 }
 

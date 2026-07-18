@@ -80,11 +80,17 @@ async fn ensure_stable_bundled_dir(command_runner: &CommandRunner) {
     // Record the version before copying so that a partial migration
     // (VERSION written but copy failed) is harmless — the stable binary
     // won't exist, so the next call retries the whole migration.
-    if write_file(command_runner, get_version_file_path(), &version).await.is_err() {
+    if write_file(command_runner, get_version_file_path(), &version)
+        .await
+        .is_err()
+    {
         tracing::warn!("Failed to write bundled version marker");
         return;
     }
-    if copy_dir(command_runner, &src_dir, &stable_dir).await.is_err() {
+    if copy_dir(command_runner, &src_dir, &stable_dir)
+        .await
+        .is_err()
+    {
         tracing::warn!("Failed to migrate bundled distrobox to stable path");
         return;
     }
@@ -115,7 +121,11 @@ async fn write_file(
 ) -> std::io::Result<()> {
     let mut cmd = Command::new("sh");
     cmd.arg("-c");
-    cmd.arg(format!("printf '%s' {} > {}", shell_quote(content), path.display()));
+    cmd.arg(format!(
+        "printf '%s' {} > {}",
+        shell_quote(content),
+        path.display()
+    ));
     let output = command_runner.output(cmd).await?;
     if !output.status.success() {
         return Err(std::io::Error::other("write_file command failed"));
@@ -124,11 +134,7 @@ async fn write_file(
 }
 
 /// Recursively copies a directory tree using `cp -r` through the command runner.
-async fn copy_dir(
-    command_runner: &CommandRunner,
-    src: &Path,
-    dst: &Path,
-) -> std::io::Result<()> {
+async fn copy_dir(command_runner: &CommandRunner, src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut cmd = Command::new("cp");
     cmd.arg("-r");
     cmd.arg(src);
@@ -149,7 +155,9 @@ fn shell_quote(s: &str) -> String {
 /// string and path of the most recent one. The stable directory
 /// (`distrobox-bundled`) is ignored automatically because `bundled` is not a
 /// numeric version.
-async fn find_latest_legacy_version_dir(command_runner: &CommandRunner) -> Option<(String, PathBuf)> {
+async fn find_latest_legacy_version_dir(
+    command_runner: &CommandRunner,
+) -> Option<(String, PathBuf)> {
     let parent = get_bundled_distrobox_dir();
 
     let mut ls_cmd = Command::new("ls");

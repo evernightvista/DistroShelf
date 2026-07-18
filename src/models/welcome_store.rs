@@ -57,9 +57,7 @@ impl WelcomeStore {
         self.root_store().distrobox_version()
     }
 
-    pub fn container_runtime(
-        &self,
-    ) -> Query<crate::backends::container_runtime::DetectedRuntime> {
+    pub fn container_runtime(&self) -> Query<crate::backends::container_runtime::DetectedRuntime> {
         self.root_store().container_runtime()
     }
 }

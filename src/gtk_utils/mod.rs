@@ -6,6 +6,8 @@ use gtk::prelude::*;
 mod typed_list_store;
 pub use typed_list_store::TypedListStore;
 mod terminal_colors;
+#[cfg(test)]
+pub mod test_utils;
 #[allow(unused_imports)]
 pub use terminal_colors::ColorPalette;
 #[allow(dead_code)]

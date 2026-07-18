@@ -2,9 +2,9 @@ use futures::StreamExt;
 use futures::TryFutureExt;
 use glib::Properties;
 use glib::subclass::prelude::*;
+use gtk::glib;
 use gtk::glib::clone;
 use gtk::prelude::*;
-use gtk::glib;
 use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -12,17 +12,15 @@ use std::rc::Rc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+use crate::backends::Status;
 use crate::backends::container_runtime::DetectedRuntime;
 use crate::backends::podman::PodmanEvent;
-use crate::backends::Status;
-use crate::distrobox_init_migration::{
-    StaleContainer, current_init_path, find_stale_containers,
-};
+use crate::distrobox_init_migration::{StaleContainer, current_init_path, find_stale_containers};
 use crate::fakers::{Command, CommandRunner};
 use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
 use crate::models::Container;
-use crate::models::DistroboxExecutable;
 use crate::models::ContainerSortKey;
+use crate::models::DistroboxExecutable;
 use crate::query::Query;
 
 mod imp {
@@ -105,24 +103,22 @@ impl MainStore {
     ) -> Self {
         let this: Self = glib::Object::builder().build();
 
-        let cmd_factory: crate::backends::distrobox::command::CmdFactory =
-            std::rc::Rc::new({
-                let dv = distrobox_version.clone();
-                move || {
-                    if let Some(Some(exe)) = dv.data() {
-                        debug_assert!(
-                            !exe.path().is_empty(),
-                            "resolved distrobox path must not be empty"
-                        );
-                        return Command::new(exe.path().to_owned());
-                    }
-                    tracing::warn!("distrobox_version not ready; falling back to bare 'distrobox'");
-                    Command::new("distrobox")
+        let cmd_factory: crate::backends::distrobox::command::CmdFactory = std::rc::Rc::new({
+            let dv = distrobox_version.clone();
+            move || {
+                if let Some(Some(exe)) = dv.data() {
+                    debug_assert!(
+                        !exe.path().is_empty(),
+                        "resolved distrobox path must not be empty"
+                    );
+                    return Command::new(exe.path().to_owned());
                 }
-            });
+                tracing::warn!("distrobox_version not ready; falling back to bare 'distrobox'");
+                Command::new("distrobox")
+            }
+        });
 
-        let distrobox =
-            crate::backends::Distrobox::new(command_runner.clone(), cmd_factory);
+        let distrobox = crate::backends::Distrobox::new(command_runner.clone(), cmd_factory);
 
         this.imp()
             .distrobox
@@ -256,18 +252,18 @@ impl MainStore {
                         }
                     }
 
-                let containers: Vec<_> = containers
-                    .into_values()
-                    .map(|v| {
-                        Container::from_info(
-                            distrobox.clone(),
-                            on_containers_changed.clone(),
-                            runtime_query.clone(),
-                            v,
-                        )
-                    })
-                    .collect();
-                Ok(containers)
+                    let containers: Vec<_> = containers
+                        .into_values()
+                        .map(|v| {
+                            Container::from_info(
+                                distrobox.clone(),
+                                on_containers_changed.clone(),
+                                runtime_query.clone(),
+                                v,
+                            )
+                        })
+                        .collect();
+                    Ok(containers)
                 }
             });
         }
@@ -523,5 +519,320 @@ fn compare_opt_datetimes(
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::backends::podman::Podman;
+    use crate::backends::{ContainerInfo, Distrobox, DistroboxCommandRunnerResponse};
+    use crate::fakers::NullCommandRunnerBuilder;
+    use crate::gtk_utils::test_utils::spin_main_context_until;
+    use crate::models::VersionedExecutable;
+
+    const STALE_INIT: &str = "/home/user/.local/share/distroshelf/distrobox-1.8.2.1/distrobox-init";
+
+    fn version_query(path: &str) -> Query<Option<DistroboxExecutable>> {
+        Query::pure(Some(DistroboxExecutable::Host(VersionedExecutable {
+            version: "1.8.2".into(),
+            path: path.into(),
+        })))
+    }
+
+    fn no_runtime_query() -> Query<DetectedRuntime> {
+        Query::new("runtime".into(), || async {
+            anyhow::bail!("Container runtime not initialized")
+        })
+    }
+
+    fn container_info(id: &str, name: &str, created_at: Option<&str>) -> ContainerInfo {
+        ContainerInfo {
+            id: id.into(),
+            name: name.into(),
+            status: Status::Created("2 minutes ago".into()),
+            image: "docker.io/library/ubuntu:latest".into(),
+            created_at: created_at.map(|s| s.to_string()),
+            last_used_at: None,
+        }
+    }
+
+    fn sorted_names(model: &gtk::SortListModel) -> Vec<String> {
+        (0..model.n_items())
+            .map(|i| {
+                model
+                    .item(i)
+                    .unwrap()
+                    .downcast::<Container>()
+                    .unwrap()
+                    .name()
+            })
+            .collect()
+    }
+
+    #[gtk::test]
+    fn test_containers_query_populates_containers() {
+        let runner = Distrobox::null_command_runner(&[DistroboxCommandRunnerResponse::List(vec![
+            container_info("1", "Ubuntu", None),
+            container_info("2", "Fedora", None),
+        ])]);
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+
+        store.load_containers();
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.containers().iter().count() == 2
+        });
+
+        assert!(
+            store.containers_query().is_success(),
+            "containers_query should succeed"
+        );
+        let names: Vec<String> = store.containers().iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["Fedora", "Ubuntu"]);
+    }
+
+    #[gtk::test]
+    fn test_containers_reconcile_preserves_identity_and_updates_status() {
+        let output = Rc::new(RefCell::new(String::from(
+            "ID | NAME | STATUS | IMAGE\n\
+             1 | Ubuntu | Created 2 minutes ago | docker.io/library/ubuntu:latest\n\
+             2 | Fedora | Created 2 minutes ago | docker.io/library/fedora:latest\n",
+        )));
+        let runner = {
+            let output = output.clone();
+            NullCommandRunnerBuilder::new()
+                .cmd_full(
+                    Command::new_with_args("distrobox", ["ls", "--no-color"]),
+                    move || Ok(output.borrow().clone()),
+                )
+                .build()
+        };
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+
+        store.load_containers();
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.containers().iter().count() == 2
+        });
+
+        let ubuntu_before = store
+            .containers()
+            .iter()
+            .find(|c| c.name() == "Ubuntu")
+            .expect("Ubuntu should be listed");
+        assert_eq!(ubuntu_before.status_tag(), "created");
+
+        *output.borrow_mut() = String::from(
+            "ID | NAME | STATUS | IMAGE\n\
+             1 | Ubuntu | Up 3 minutes | docker.io/library/ubuntu:latest\n\
+             3 | Arch | Created 1 minute ago | docker.io/library/archlinux:latest\n",
+        );
+        store.containers_query().fetch();
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.containers().iter().any(|c| c.name() == "Arch")
+        });
+
+        let names: HashSet<String> = store.containers().iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["Ubuntu".to_string(), "Arch".to_string()]),
+            "Fedora should be removed, Arch added"
+        );
+        let ubuntu_after = store
+            .containers()
+            .iter()
+            .find(|c| c.name() == "Ubuntu")
+            .expect("Ubuntu should still be listed");
+        assert_eq!(
+            ubuntu_before, ubuntu_after,
+            "reconcile should preserve the Container instance"
+        );
+        assert_eq!(
+            ubuntu_after.status_tag(),
+            "up",
+            "reconcile should update the status of the preserved instance"
+        );
+    }
+
+    #[gtk::test]
+    fn test_sort_key_reorders_sorted_model() {
+        let store = MainStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            no_runtime_query(),
+            version_query("distrobox"),
+        );
+
+        let noop: Rc<dyn Fn()> = Rc::new(|| {});
+        let make = |id: &str, name: &str, created_at: Option<&str>| {
+            Container::from_info(
+                store.distrobox().clone(),
+                noop.clone(),
+                store.runtime_query(),
+                container_info(id, name, created_at),
+            )
+        };
+        store
+            .containers()
+            .append(&make("1", "beta", Some("2024-01-01T00:00:00Z")));
+        store
+            .containers()
+            .append(&make("2", "alpha", Some("2023-01-01T00:00:00Z")));
+        store
+            .containers()
+            .append(&make("3", "gamma", Some("2025-01-01T00:00:00Z")));
+        store.containers().append(&make("4", "delta", None));
+
+        let sorted = store.sorted_container_model();
+        assert_eq!(
+            sorted_names(&sorted),
+            ["alpha", "beta", "delta", "gamma"],
+            "default sort key should order by name"
+        );
+
+        store.set_containers_sort_key(ContainerSortKey::CreationDate);
+        assert_eq!(
+            sorted_names(&sorted),
+            ["gamma", "beta", "alpha", "delta"],
+            "creation-date sort should order newest first with missing dates last"
+        );
+
+        store.set_containers_sort_key(ContainerSortKey::Name);
+        assert_eq!(sorted_names(&sorted), ["alpha", "beta", "delta", "gamma"]);
+    }
+
+    #[gtk::test]
+    fn test_selected_container_none_when_empty_then_first_after_load() {
+        let runner = Distrobox::null_command_runner(&[DistroboxCommandRunnerResponse::List(vec![
+            container_info("1", "Ubuntu", None),
+            container_info("2", "Fedora", None),
+        ])]);
+        let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
+
+        assert!(store.selected_container().is_none());
+        assert!(store.selected_container_name().is_none());
+
+        store.load_containers();
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.selected_container().is_some()
+        });
+
+        assert_eq!(
+            store.selected_container_name(),
+            Some("Fedora".to_string()),
+            "SingleSelection should auto-select the first sorted container"
+        );
+    }
+
+    #[gtk::test]
+    fn test_check_stale_containers_flags_stale_container() {
+        let mounts_json = format!(
+            r#"[{{"Type":"bind","Source":"{}","Destination":"/usr/bin/entrypoint","Mode":"ro","RW":false,"Propagation":"rprivate"}}]"#,
+            STALE_INIT
+        );
+        let runner = NullCommandRunnerBuilder::new()
+            .cmd(
+                &["/usr/bin/distrobox", "ls", "--no-color"],
+                "ID | NAME | STATUS | IMAGE\n\
+                 1 | Ubuntu | Created 2 minutes ago | docker.io/library/ubuntu:latest\n",
+            )
+            .cmd_full(
+                Command::new_with_args(
+                    "podman",
+                    ["inspect", "--format", "{{ json .Mounts }}", "Ubuntu"],
+                ),
+                move || Ok(mounts_json.clone()),
+            )
+            .cmd_full_with_status(
+                Command::new_with_args("test", ["-e", STALE_INIT]),
+                ExitStatusExt::from_raw(1),
+                || Ok(String::new()),
+            )
+            .build();
+        let runtime = DetectedRuntime {
+            runtime: Rc::new(Podman::new(Rc::new(runner.clone()))),
+            version: "4.9.3".into(),
+        };
+        let store = MainStore::new(
+            runner,
+            Query::pure(runtime),
+            version_query("/usr/bin/distrobox"),
+        );
+
+        store.check_stale_containers();
+        spin_main_context_until(Duration::from_secs(5), || {
+            !store.stale_containers().is_empty()
+        });
+
+        let stale: Vec<StaleContainer> = store
+            .stale_containers()
+            .iter()
+            .map(|obj| obj.borrow::<StaleContainer>().clone())
+            .collect();
+        assert_eq!(
+            stale,
+            vec![StaleContainer {
+                name: "Ubuntu".to_string(),
+                stale_init_path: PathBuf::from(STALE_INIT),
+                running: false,
+            }]
+        );
+    }
+
+    #[gtk::test]
+    fn test_check_stale_containers_clears_when_no_distrobox_version() {
+        let store = MainStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            no_runtime_query(),
+            Query::pure(None),
+        );
+        store
+            .stale_containers()
+            .append(&glib::BoxedAnyObject::new(StaleContainer {
+                name: "ghost".to_string(),
+                stale_init_path: PathBuf::from(STALE_INIT),
+                running: false,
+            }));
+
+        store.check_stale_containers();
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.stale_containers().is_empty()
+        });
+
+        assert!(
+            store.stale_containers().is_empty(),
+            "stale containers should be cleared when no distrobox executable is resolved"
+        );
+    }
+
+    #[gtk::test]
+    fn test_check_stale_containers_coalesces_concurrent_calls() {
+        let store = MainStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            no_runtime_query(),
+            Query::pure(None),
+        );
+
+        assert!(
+            store.imp().stale_check_running.get(),
+            "constructor should have started a stale check"
+        );
+
+        store.check_stale_containers();
+        assert!(
+            store.imp().stale_check_pending.get(),
+            "a concurrent call should be recorded as pending, not run in parallel"
+        );
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            !store.imp().stale_check_running.get()
+        });
+
+        assert!(!store.imp().stale_check_running.get());
+        assert!(
+            !store.imp().stale_check_pending.get(),
+            "the pending re-run should have been consumed"
+        );
     }
 }

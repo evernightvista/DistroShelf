@@ -290,10 +290,7 @@ impl DistroShelfApplication {
                 builder.cmd_full(test_cmd, || Ok(String::new()));
                 let mut version_cmd = Command::new(&bundled_path);
                 version_cmd.arg("version");
-                builder.cmd_full(
-                    version_cmd,
-                    || Ok("distrobox: 1.8.2.5".to_string()),
-                );
+                builder.cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()));
                 builder.fallback(ExitStatus::from_raw(1));
                 builder.build()
             }

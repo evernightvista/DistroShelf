@@ -404,7 +404,8 @@ mod imp {
             obj.root_store().set_current_dialog(DialogType::TaskManager);
 
             // Set the preference for future launches
-            obj.root_store().set_distrobox_source(DistroboxSource::Bundled);
+            obj.root_store()
+                .set_distrobox_source(DistroboxSource::Bundled);
         }
     }
 }

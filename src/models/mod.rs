@@ -1,13 +1,13 @@
 pub mod container;
 pub mod container_sort_key;
 pub mod dialog_type;
+pub mod distrobox_executable;
 pub mod distrobox_task;
 pub mod image;
 pub mod known_distros;
 pub mod main_store;
 pub mod root_store;
 pub mod tagged_object;
-pub mod distrobox_executable;
 pub mod versioned_executable;
 pub mod view_type;
 pub mod welcome_store;

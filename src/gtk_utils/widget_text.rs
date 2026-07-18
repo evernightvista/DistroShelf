@@ -170,10 +170,12 @@ mod tests {
             .iter()
             .find(|e| e.path.is_empty())
             .expect("root window should produce an entry with empty path");
-        assert!(root_entry
-            .strings
-            .iter()
-            .any(|s| s.source == "title" && s.value == "Window Title"));
+        assert!(
+            root_entry
+                .strings
+                .iter()
+                .any(|s| s.source == "title" && s.value == "Window Title")
+        );
     }
 
     #[gtk::test]

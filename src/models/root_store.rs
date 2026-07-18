@@ -20,11 +20,10 @@ use crate::backends::Status;
 use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime};
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
-use crate::distrobox_init_migration::{
-    StaleContainer, current_init_path, migrate_stale_path,
-};
+use crate::distrobox_init_migration::{StaleContainer, current_init_path, migrate_stale_path};
 use crate::fakers::{Command, CommandRunner, FdMode};
 use crate::gtk_utils::TypedListStore;
+use crate::models::Container;
 use crate::models::DistroboxExecutable;
 use crate::models::DistroboxSource;
 use crate::models::DistroboxTask;
@@ -32,7 +31,6 @@ use crate::models::MainStore;
 use crate::models::VersionedExecutable;
 use crate::models::ViewType;
 use crate::models::WelcomeStore;
-use crate::models::Container;
 use crate::models::{DialogParams, DialogType};
 use crate::query::Query;
 
@@ -116,9 +114,10 @@ mod imp {
                 distrobox_version: RefCell::new(Query::new("distrobox_version".into(), || async {
                     Ok(None)
                 })),
-                bundled_distrobox_version: Query::new("bundled_distrobox_version".into(), || async {
-                    Ok(None)
-                }),
+                bundled_distrobox_version: Query::new(
+                    "bundled_distrobox_version".into(),
+                    || async { Ok(None) },
+                ),
                 host_distrobox_version: Query::new("host_distrobox_version".into(), || async {
                     Ok(None)
                 }),
@@ -244,25 +243,22 @@ impl RootStore {
 
         // selected_source drives the distrobox_version derivation.
         let this_clone_for_source = this.clone();
-        let selected_source =
-            Query::<DistroboxSource>::new("selected_source".into(), move || {
-                let this = this_clone_for_source.clone();
-                async move { Ok(DistroboxSource::from_setting(&this.settings())) }
-            });
-
-        let host_version = this.host_distrobox_version().switch_map(|info| {
-            match info {
-                Some(exe) => Query::pure(Some(DistroboxExecutable::Host(exe.clone()))),
-                None => Query::pure(None),
-            }
+        let selected_source = Query::<DistroboxSource>::new("selected_source".into(), move || {
+            let this = this_clone_for_source.clone();
+            async move { Ok(DistroboxSource::from_setting(&this.settings())) }
         });
 
-        let bundled_version = this.bundled_distrobox_version().switch_map(|info| {
-            match info {
+        let host_version = this.host_distrobox_version().switch_map(|info| match info {
+            Some(exe) => Query::pure(Some(DistroboxExecutable::Host(exe.clone()))),
+            None => Query::pure(None),
+        });
+
+        let bundled_version = this
+            .bundled_distrobox_version()
+            .switch_map(|info| match info {
                 Some(exe) => Query::pure(Some(DistroboxExecutable::Bundled(exe.clone()))),
                 None => Query::pure(None),
-            }
-        });
+            });
 
         let distrobox_version = selected_source.switch_map({
             let host_version = host_version.clone();
@@ -351,15 +347,17 @@ impl RootStore {
             let this_clone = this_clone.clone();
             async move {
                 let command_runner = this_clone.command_runner();
-                let Some(path) = crate::distrobox_downloader::resolve_bundled_distrobox_path(&command_runner).await else {
+                let Some(path) =
+                    crate::distrobox_downloader::resolve_bundled_distrobox_path(&command_runner)
+                        .await
+                else {
                     return Ok(None);
                 };
                 let path = path.to_string_lossy().into_owned();
-                let temp_factory: crate::backends::distrobox::command::CmdFactory =
-                    Rc::new({
-                        let path = path.clone();
-                        move || Command::new(path.clone())
-                    });
+                let temp_factory: crate::backends::distrobox::command::CmdFactory = Rc::new({
+                    let path = path.clone();
+                    move || Command::new(path.clone())
+                });
                 let distrobox = Distrobox::new(this_clone.command_runner(), temp_factory);
                 let version = distrobox.version().map_err(anyhow::Error::from).await?;
                 Ok(Some(VersionedExecutable { version, path }))
@@ -393,9 +391,11 @@ impl RootStore {
                             let obj_clone = obj.clone();
                             glib::spawn_future_local(async move {
                                 let runner = obj_clone.command_runner();
-                                if crate::distrobox_downloader::resolve_bundled_distrobox_path(&runner)
-                                    .await
-                                    .is_none()
+                                if crate::distrobox_downloader::resolve_bundled_distrobox_path(
+                                    &runner,
+                                )
+                                .await
+                                .is_none()
                                 {
                                     obj_clone.download_distrobox();
                                 } else {
@@ -634,76 +634,81 @@ impl RootStore {
             .collect();
 
         let this = self.clone();
-        Some(self.create_task("system", "migrate-init", move |task| async move {
-            task.set_description(
-                "Repairing containers that point to an outdated distrobox-init location",
-            );
-            let Some(Some(exe)) = this.distrobox_version().data() else {
-                anyhow::bail!("No distrobox executable available");
-            };
-            let Some(current_init) = current_init_path(exe.path()) else {
-                anyhow::bail!(
-                    "Cannot determine the distrobox-init location from {}",
-                    exe.path()
+        Some(
+            self.create_task("system", "migrate-init", move |task| async move {
+                task.set_description(
+                    "Repairing containers that point to an outdated distrobox-init location",
                 );
-            };
+                let Some(Some(exe)) = this.distrobox_version().data() else {
+                    anyhow::bail!("No distrobox executable available");
+                };
+                let Some(current_init) = current_init_path(exe.path()) else {
+                    anyhow::bail!(
+                        "Cannot determine the distrobox-init location from {}",
+                        exe.path()
+                    );
+                };
 
-            let distrobox = this
-                .main_store()
-                .expect("migrate_stale_containers requires Main view")
-                .distrobox()
-                .clone();
-            let running: HashSet<String> = distrobox
-                .list()
-                .await?
-                .into_values()
-                .filter(|c| matches!(c.status, Status::Up(_)))
-                .map(|c| c.name)
-                .collect();
+                let distrobox = this
+                    .main_store()
+                    .expect("migrate_stale_containers requires Main view")
+                    .distrobox()
+                    .clone();
+                let running: HashSet<String> = distrobox
+                    .list()
+                    .await?
+                    .into_values()
+                    .filter(|c| matches!(c.status, Status::Up(_)))
+                    .map(|c| c.name)
+                    .collect();
 
-            let runner = this.command_runner();
-            let mut failed = 0;
-            let mut skipped = 0;
-            for entry in &stale {
-                if running.contains(&entry.name) {
+                let runner = this.command_runner();
+                let mut failed = 0;
+                let mut skipped = 0;
+                for entry in &stale {
+                    if running.contains(&entry.name) {
+                        task.append_output(&format!(
+                            "Skipping {}: the container is running. Stop it and migrate again.\r\n",
+                            entry.name
+                        ));
+                        skipped += 1;
+                        continue;
+                    }
                     task.append_output(&format!(
-                        "Skipping {}: the container is running. Stop it and migrate again.\r\n",
-                        entry.name
+                        "{}: linking {} -> {}\r\n",
+                        entry.name,
+                        entry.stale_init_path.display(),
+                        current_init.display()
                     ));
-                    skipped += 1;
-                    continue;
-                }
-                task.append_output(&format!(
-                    "{}: linking {} -> {}\r\n",
-                    entry.name,
-                    entry.stale_init_path.display(),
-                    current_init.display()
-                ));
-                match migrate_stale_path(&runner, &entry.stale_init_path, &current_init).await {
-                    Ok(()) => {
-                        task.append_output(&format!("{}: migrated successfully\r\n", entry.name));
-                    }
-                    Err(e) => {
-                        task.append_output(&format!("{}: failed: {}\r\n", entry.name, e));
-                        failed += 1;
+                    match migrate_stale_path(&runner, &entry.stale_init_path, &current_init).await {
+                        Ok(()) => {
+                            task.append_output(&format!(
+                                "{}: migrated successfully\r\n",
+                                entry.name
+                            ));
+                        }
+                        Err(e) => {
+                            task.append_output(&format!("{}: failed: {}\r\n", entry.name, e));
+                            failed += 1;
+                        }
                     }
                 }
-            }
 
-            if let Some(main) = this.main_store() {
-                main.check_stale_containers();
-            }
-            if failed > 0 {
-                anyhow::bail!("Failed to migrate {} container(s)", failed);
-            }
-            if skipped > 0 {
-                task.append_output(&format!(
-                    "Skipped {} running container(s). Stop them and migrate again.\r\n",
-                    skipped
-                ));
-            }
-            Ok(())
-        }))
+                if let Some(main) = this.main_store() {
+                    main.check_stale_containers();
+                }
+                if failed > 0 {
+                    anyhow::bail!("Failed to migrate {} container(s)", failed);
+                }
+                if skipped > 0 {
+                    task.append_output(&format!(
+                        "Skipped {} running container(s). Stop them and migrate again.\r\n",
+                        skipped
+                    ));
+                }
+                Ok(())
+            }),
+        )
     }
 
     pub fn distrobox_source(&self) -> DistroboxSource {
@@ -1292,29 +1297,11 @@ impl Default for RootStore {
 mod tests {
     use std::future::pending;
     use std::io;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
     use crate::fakers::NullCommandRunnerBuilder;
-
-    fn spin_main_context_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
-        let context = glib::MainContext::ref_thread_default();
-        let deadline = Instant::now() + timeout;
-
-        while Instant::now() < deadline {
-            while context.pending() {
-                context.iteration(false);
-            }
-            if condition() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
-        while context.pending() {
-            context.iteration(false);
-        }
-    }
+    use crate::gtk_utils::test_utils::spin_main_context_until;
 
     #[gtk::test]
     fn test_resolve_path() {
@@ -1665,7 +1652,10 @@ mod tests {
             "host_distrobox_version should succeed"
         );
         assert!(
-            store.host_distrobox_version().data().is_some_and(|d| d.is_none()),
+            store
+                .host_distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_none()),
             "host_distrobox_version data should be None when no host distrobox is available"
         );
     }
@@ -1678,7 +1668,8 @@ mod tests {
 
         let store = RootStore::new(NullCommandRunnerBuilder::new().build());
 
-        store.settings()
+        store
+            .settings()
             .set_string("distrobox-executable", "host")
             .expect("distrobox-executable key must exist in schema");
 
@@ -1692,9 +1683,7 @@ mod tests {
         store.host_distrobox_version().refetch();
         store.distrobox_version().refetch();
 
-        spin_main_context_until(Duration::from_secs(5), || {
-            fired.load(Ordering::SeqCst)
-        });
+        spin_main_context_until(Duration::from_secs(5), || fired.load(Ordering::SeqCst));
 
         assert!(
             fired.load(Ordering::SeqCst),
@@ -1708,10 +1697,9 @@ mod tests {
 
         let store = RootStore::new(
             NullCommandRunnerBuilder::new()
-                .cmd_full(
-                    Command::new_with_args("distrobox", ["version"]),
-                    || Ok("distrobox: 1.8.2.3".to_string()),
-                )
+                .cmd_full(Command::new_with_args("distrobox", ["version"]), || {
+                    Ok("distrobox: 1.8.2.3".to_string())
+                })
                 .cmd_full(
                     Command::new_with_args("sh", ["-c", "command -v distrobox"]),
                     || Ok("/usr/bin/distrobox".to_string()),
@@ -1719,7 +1707,8 @@ mod tests {
                 .build(),
         );
 
-        store.settings()
+        store
+            .settings()
             .set_string("distrobox-executable", "host")
             .expect("distrobox-executable key must exist in schema");
 
@@ -1750,7 +1739,8 @@ mod tests {
     fn test_welcome_view_shown_when_host_distrobox_not_available() {
         let store = RootStore::new(NullCommandRunnerBuilder::new().build());
 
-        store.settings()
+        store
+            .settings()
             .set_string("distrobox-executable", "host")
             .expect("distrobox-executable key must exist in schema");
 
@@ -1771,7 +1761,10 @@ mod tests {
             "distrobox_version should succeed even when not available"
         );
         assert!(
-            store.distrobox_version().data().is_some_and(|d| d.is_none()),
+            store
+                .distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_none()),
             "distrobox_version should be None when host is not available"
         );
         assert_eq!(
@@ -1791,15 +1784,12 @@ mod tests {
 
         let store = RootStore::new(
             NullCommandRunnerBuilder::new()
-                .cmd_full_with_status(
-                    test_cmd,
-                    ExitStatusExt::from_raw(1),
-                    || Ok(String::new()),
-                )
+                .cmd_full_with_status(test_cmd, ExitStatusExt::from_raw(1), || Ok(String::new()))
                 .build(),
         );
 
-        store.settings()
+        store
+            .settings()
             .set_string("distrobox-executable", "bundled")
             .expect("distrobox-executable key must exist in schema");
 
@@ -1814,7 +1804,10 @@ mod tests {
             "distrobox_version should succeed for bundled source"
         );
         assert!(
-            store.distrobox_version().data().is_some_and(|d| d.is_none()),
+            store
+                .distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_none()),
             "distrobox_version should be None when bundled is not installed"
         );
         assert_eq!(
@@ -1832,14 +1825,12 @@ mod tests {
 
         let store = RootStore::new(
             NullCommandRunnerBuilder::new()
-                .cmd_full(
-                    version_cmd,
-                    || Ok("distrobox: 1.8.2.5".to_string()),
-                )
+                .cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()))
                 .build(),
         );
 
-        store.settings()
+        store
+            .settings()
             .set_string("distrobox-executable", "bundled")
             .expect("distrobox-executable key must exist in schema");
 
@@ -1854,7 +1845,10 @@ mod tests {
             "distrobox_version should succeed"
         );
         assert!(
-            store.distrobox_version().data().is_some_and(|d| d.is_some()),
+            store
+                .distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_some()),
             "distrobox_version should have data when bundled is installed"
         );
         assert_eq!(
@@ -1912,6 +1906,123 @@ mod tests {
                 .data()
                 .is_some_and(|d| d.is_none()),
             "bundled_distrobox_version should be None"
+        );
+    }
+
+    #[gtk::test]
+    fn test_initial_view_is_main_with_main_store() {
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        assert_eq!(store.current_view(), ViewType::Main);
+        assert!(
+            store.main_store().is_some(),
+            "main_store should exist on Main view"
+        );
+        assert!(
+            store.welcome_store().is_none(),
+            "welcome_store should not exist on Main view"
+        );
+    }
+
+    #[gtk::test]
+    fn test_set_current_view_welcome_swaps_stores() {
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        store.set_current_view(ViewType::Welcome);
+        assert_eq!(store.current_view(), ViewType::Welcome);
+        assert!(
+            store.welcome_store().is_some(),
+            "welcome_store should be created when switching to Welcome"
+        );
+        assert!(
+            store.main_store().is_none(),
+            "main_store should be dropped when switching to Welcome"
+        );
+
+        store.set_current_view(ViewType::Main);
+        assert_eq!(store.current_view(), ViewType::Main);
+        assert!(
+            store.main_store().is_some(),
+            "main_store should be recreated when switching back to Main"
+        );
+        assert!(
+            store.welcome_store().is_none(),
+            "welcome_store should be dropped when switching back to Main"
+        );
+    }
+
+    #[gtk::test]
+    fn test_set_current_view_fires_notifications() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+
+        let view_count = Rc::new(Cell::new(0u32));
+        let main_count = Rc::new(Cell::new(0u32));
+        let welcome_count = Rc::new(Cell::new(0u32));
+
+        store.connect_notify_local(Some("current-view"), {
+            let view_count = view_count.clone();
+            move |_, _| view_count.set(view_count.get() + 1)
+        });
+        store.connect_notify_local(Some("main-store"), {
+            let main_count = main_count.clone();
+            move |_, _| main_count.set(main_count.get() + 1)
+        });
+        store.connect_notify_local(Some("welcome-store"), {
+            let welcome_count = welcome_count.clone();
+            move |_, _| welcome_count.set(welcome_count.get() + 1)
+        });
+
+        store.set_current_view(ViewType::Welcome);
+
+        assert_eq!(view_count.get(), 1, "notify::current-view should fire once");
+        assert_eq!(main_count.get(), 1, "notify::main-store should fire once");
+        assert_eq!(
+            welcome_count.get(),
+            1,
+            "notify::welcome-store should fire once"
+        );
+    }
+
+    #[gtk::test]
+    fn test_set_current_view_same_value_is_noop() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let main_before = store.main_store().expect("main_store should exist");
+
+        let view_count = Rc::new(Cell::new(0u32));
+        store.connect_notify_local(Some("current-view"), {
+            let view_count = view_count.clone();
+            move |_, _| view_count.set(view_count.get() + 1)
+        });
+        let store_count = Rc::new(Cell::new(0u32));
+        for prop in ["main-store", "welcome-store"] {
+            store.connect_notify_local(Some(prop), {
+                let store_count = store_count.clone();
+                move |_, _| store_count.set(store_count.get() + 1)
+            });
+        }
+
+        store.set_current_view(ViewType::Main);
+
+        assert_eq!(
+            view_count.get(),
+            1,
+            "GObject auto-notifies current-view on every set (no EXPLICIT_NOTIFY), even for no-op sets"
+        );
+        assert_eq!(
+            store_count.get(),
+            0,
+            "store properties should not notify when the view does not change"
+        );
+        let main_after = store.main_store().expect("main_store should still exist");
+        assert_eq!(
+            main_before, main_after,
+            "main_store instance should be unchanged when view does not change"
         );
     }
 }
