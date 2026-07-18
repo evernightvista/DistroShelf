@@ -7,7 +7,7 @@ use std::time::Duration;
 use adw::prelude::*;
 
 use crate::application::DistroboxStoreTy;
-use crate::fakers::{FileSystem, Settings};
+use crate::fakers::Settings;
 use crate::gtk_utils::extract_widget_text;
 use crate::gtk_utils::test_utils::spin_main_context_until;
 use crate::models::{DistroboxSource, RootStore, ViewType};
@@ -23,7 +23,7 @@ fn boot_first_start(store_ty: DistroboxStoreTy) -> (DistroShelfWindow, RootStore
         .null_command_runner()
         .expect("null store type must provide a command runner");
     let settings = Settings::new_null();
-    let root_store = RootStore::new(runner, settings, FileSystem::new_null());
+    let root_store = RootStore::new(runner, settings, store_ty.null_file_system());
     root_store.start_background_tasks();
 
     let window = DistroShelfWindow::new_unattached(root_store.clone());

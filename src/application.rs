@@ -32,7 +32,7 @@ use crate::DistroShelfWindow;
 use crate::backends;
 use crate::backends::DistroboxCommandRunnerResponse;
 use crate::config;
-use crate::fakers::{Command, CommandRunner, FileSystem, NullCommandRunnerBuilder, Settings};
+use crate::fakers::{Command, CommandRunner, FileSystem, NullCommandRunnerBuilder, NullFileSystemBuilder, Settings};
 use crate::models::known_distros;
 use crate::root_store::RootStore;
 
@@ -138,6 +138,19 @@ impl DistroboxStoreTy {
         Some(builder.build())
     }
 
+    pub fn null_file_system(self) -> FileSystem {
+        match self {
+            DistroboxStoreTy::Real => FileSystem::new_real(),
+            DistroboxStoreTy::NullBundledOnly | DistroboxStoreTy::NullHostAndBundledWorking => {
+                let mut builder = NullFileSystemBuilder::new();
+                let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
+                builder.file(&bundled_path, "fake distrobox script");
+                builder.build()
+            }
+            _ => FileSystem::new_null(),
+        }
+    }
+
     /// Registers each distrobox response, rewriting the `distrobox` program
     /// to `program`. Non-distrobox helper commands included in a response
     /// (e.g. `printenv`) are registered unchanged.
@@ -189,9 +202,6 @@ impl DistroboxStoreTy {
     /// Makes the bundled distrobox appear installed and working.
     fn add_installed_bundled_distrobox(builder: &mut NullCommandRunnerBuilder) {
         let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
-        let mut test_cmd = Command::new("test");
-        test_cmd.arg("-e").arg(&bundled_path);
-        builder.cmd_full(test_cmd, || Ok(String::new()));
         let mut version_cmd = Command::new(&bundled_path);
         version_cmd.arg("version");
         builder.cmd_full(version_cmd, || {

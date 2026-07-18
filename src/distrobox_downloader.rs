@@ -1,9 +1,11 @@
 use crate::fakers::Command;
 use crate::fakers::CommandRunner;
+use crate::fakers::FileSystem;
 use crate::models::DistroboxTask;
 use crate::models::RootStore;
 use anyhow::{Context, anyhow};
 use gtk::glib;
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub const DISTROBOX_VERSION: &str = "1.8.2.5";
@@ -45,13 +47,10 @@ fn get_version_file_path() -> PathBuf {
 /// installs to the stable path on first use.
 ///
 /// Returns `None` only when no bundled distrobox (stable or legacy) is present.
-///
-/// All filesystem operations are routed through `command_runner` so that
-/// `NullCommandRunner` can fully stub this function in tests.
-pub async fn resolve_bundled_distrobox_path(command_runner: &CommandRunner) -> Option<PathBuf> {
-    ensure_stable_bundled_dir(command_runner).await;
+pub async fn resolve_bundled_distrobox_path(file_system: &FileSystem) -> Option<PathBuf> {
+    ensure_stable_bundled_dir(file_system);
     let path = get_bundled_distrobox_path();
-    if path_exists(command_runner, &path).await {
+    if file_system.exists(&path) {
         Some(path)
     } else {
         None
@@ -68,29 +67,23 @@ pub fn is_bundled_update_available(installed_version: &str) -> bool {
 /// versioned directory does, the legacy directory is *copied* (not moved) into
 /// the stable path so that already-created containers — which may reference the
 /// legacy absolute path — keep working.
-async fn ensure_stable_bundled_dir(command_runner: &CommandRunner) {
+fn ensure_stable_bundled_dir(file_system: &FileSystem) {
     let bundled_path = get_bundled_distrobox_path();
-    if path_exists(command_runner, &bundled_path).await {
+    if file_system.exists(&bundled_path) {
         return;
     }
-    let Some((version, src_dir)) = find_latest_legacy_version_dir(command_runner).await else {
+    let Some((version, src_dir)) = find_latest_legacy_version_dir(file_system) else {
         return;
     };
     let stable_dir = get_stable_bundled_dir();
-    // Record the version before copying so that a partial migration
-    // (VERSION written but copy failed) is harmless — the stable binary
-    // won't exist, so the next call retries the whole migration.
-    if write_file(command_runner, get_version_file_path(), &version)
-        .await
+    if file_system
+        .write(&get_version_file_path(), &version)
         .is_err()
     {
         tracing::warn!("Failed to write bundled version marker");
         return;
     }
-    if copy_dir(command_runner, &src_dir, &stable_dir)
-        .await
-        .is_err()
-    {
+    if copy_dir_via_fs(file_system, &src_dir, &stable_dir).is_err() {
         tracing::warn!("Failed to migrate bundled distrobox to stable path");
         return;
     }
@@ -101,87 +94,50 @@ async fn ensure_stable_bundled_dir(command_runner: &CommandRunner) {
     );
 }
 
-/// Checks if a path exists by running `test -e` through the command runner.
-pub async fn path_exists(command_runner: &CommandRunner, path: &Path) -> bool {
-    let mut cmd = Command::new("test");
-    cmd.arg("-e");
-    cmd.arg(path);
-    command_runner
-        .output(cmd)
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Writes content to a file via shell redirect through the command runner.
-async fn write_file(
-    command_runner: &CommandRunner,
-    path: PathBuf,
-    content: &str,
-) -> std::io::Result<()> {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c");
-    cmd.arg(format!(
-        "printf '%s' {} > {}",
-        shell_quote(content),
-        path.display()
-    ));
-    let output = command_runner.output(cmd).await?;
-    if !output.status.success() {
-        return Err(std::io::Error::other("write_file command failed"));
+fn copy_dir_via_fs(file_system: &FileSystem, src: &Path, dst: &Path) -> io::Result<()> {
+    file_system.create_dir_all(dst)?;
+    for entry in file_system.read_dir(src)? {
+        let src_path = src.join(&entry);
+        let dst_path = dst.join(&entry);
+        match file_system.read_to_string(&src_path) {
+            Ok(content) => {
+                file_system.write(&dst_path, &content)?;
+            }
+            Err(_) => {
+                copy_dir_via_fs(file_system, &src_path, &dst_path)?;
+            }
+        }
     }
     Ok(())
-}
-
-/// Recursively copies a directory tree using `cp -r` through the command runner.
-async fn copy_dir(command_runner: &CommandRunner, src: &Path, dst: &Path) -> std::io::Result<()> {
-    let mut cmd = Command::new("cp");
-    cmd.arg("-r");
-    cmd.arg(src);
-    cmd.arg(dst);
-    let output = command_runner.output(cmd).await?;
-    if !output.status.success() {
-        return Err(std::io::Error::other("copy_dir command failed"));
-    }
-    Ok(())
-}
-
-/// Minimal single-quote escaping for shell arguments.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Scans for legacy `distrobox-<VERSION>/` directories and returns the version
 /// string and path of the most recent one. The stable directory
 /// (`distrobox-bundled`) is ignored automatically because `bundled` is not a
 /// numeric version.
-async fn find_latest_legacy_version_dir(
-    command_runner: &CommandRunner,
-) -> Option<(String, PathBuf)> {
+fn find_latest_legacy_version_dir(file_system: &FileSystem) -> Option<(String, PathBuf)> {
     let parent = get_bundled_distrobox_dir();
 
-    let mut ls_cmd = Command::new("ls");
-    ls_cmd.arg("-1").arg(&parent);
-    let output = command_runner.output(ls_cmd).await.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let entries = file_system.read_dir(&parent).ok()?;
 
-    let mut candidates: Vec<(Vec<u32>, String, PathBuf)> = text
-        .lines()
-        .filter_map(|name_str| {
+    let mut candidates: Vec<(Vec<u32>, String, PathBuf)> = entries
+        .iter()
+        .filter_map(|name| {
+            let name_str = name.to_str()?;
             let version_str = name_str.strip_prefix("distrobox-")?;
             let parts = parse_semver(version_str)?;
-            Some((parts, version_str.to_string(), parent.join(name_str)))
+            Some((
+                parts,
+                version_str.to_string(),
+                parent.join(name),
+            ))
         })
         .collect();
 
-    // Filter to entries that contain a `distrobox` binary
     let mut valid = Vec::new();
     for (parts, version, path) in candidates.drain(..) {
         let distrobox_path = path.join("distrobox");
-        if path_exists(command_runner, &distrobox_path).await {
+        if file_system.exists(&distrobox_path) {
             valid.push((parts, version, path));
         }
     }
@@ -216,6 +172,10 @@ pub async fn download_distrobox(
         .upgrade()
         .map(|store| store.command_runner())
         .unwrap_or_else(CommandRunner::new_real);
+    let file_system = root_store_weak
+        .upgrade()
+        .map(|store| store.file_system())
+        .unwrap_or_else(FileSystem::new_real);
     let download_dir = get_bundled_distrobox_dir();
     let tarball_path = download_dir.join("distrobox.tar.gz");
     let url = format!(
@@ -223,8 +183,9 @@ pub async fn download_distrobox(
         DISTROBOX_VERSION
     );
 
-    // Ensure directory exists
-    std::fs::create_dir_all(&download_dir).context("Failed to create download directory")?;
+    file_system
+        .create_dir_all(&download_dir)
+        .context("Failed to create download directory")?;
 
     log(
         &task,
@@ -287,7 +248,9 @@ pub async fn download_distrobox(
 
     // 3b. Clean up tarball
     log(&task, "Removing tarball...");
-    std::fs::remove_file(&tarball_path).context("Failed to remove tarball")?;
+    file_system
+        .remove_file(&tarball_path)
+        .context("Failed to remove tarball")?;
 
     // 4. Move the extracted `distrobox-<VERSION>/` folder to the stable path so
     //    the absolute path baked into containers never changes across updates.
@@ -297,32 +260,30 @@ pub async fn download_distrobox(
         &task,
         &format!("Installing to stable path {:?}...", stable_dir),
     );
-    if stable_dir.exists() {
-        std::fs::remove_dir_all(&stable_dir)
+    if file_system.exists(&stable_dir) {
+        file_system
+            .remove_dir_all(&stable_dir)
             .context("Failed to remove previous bundled distrobox")?;
     }
-    std::fs::rename(&extracted_dir, &stable_dir)
+    file_system
+        .rename(&extracted_dir, &stable_dir)
         .context("Failed to move bundled distrobox to stable path")?;
-    std::fs::write(stable_dir.join(VERSION_FILE), DISTROBOX_VERSION)
+    file_system
+        .write(&stable_dir.join(VERSION_FILE), DISTROBOX_VERSION)
         .context("Failed to write version marker")?;
 
     // 5. Make executable (it should be already, but just in case)
     let binary_path = get_bundled_distrobox_path();
     log(
         &task,
-        &format!("Setting executable permissions on {:?}...", binary_path),
+        &format!(
+            "Setting executable permissions on {:?}...",
+            binary_path
+        ),
     );
-
-    let mut chmod_cmd = Command::new("chmod");
-    chmod_cmd.arg("+x");
-    chmod_cmd.arg(&binary_path);
-    chmod_cmd.stdout = crate::fakers::FdMode::Pipe;
-    chmod_cmd.stderr = crate::fakers::FdMode::Pipe;
-
-    let output = command_runner.output(chmod_cmd).await?;
-    if !output.status.success() {
-        return Err(anyhow!("chmod failed"));
-    }
+    file_system
+        .set_unix_executable(&binary_path)
+        .context("Failed to set executable permissions")?;
 
     log(&task, "Distrobox installed successfully.");
 

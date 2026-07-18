@@ -353,9 +353,8 @@ impl RootStore {
         this.imp().bundled_distrobox_version.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
-                let command_runner = this_clone.command_runner();
                 let Some(path) =
-                    crate::distrobox_downloader::resolve_bundled_distrobox_path(&command_runner)
+                    crate::distrobox_downloader::resolve_bundled_distrobox_path(&this_clone.file_system())
                         .await
                 else {
                     return Ok(None);
@@ -397,9 +396,8 @@ impl RootStore {
                         if new_source == DistroboxSource::Bundled {
                             let obj_clone = obj.clone();
                             glib::spawn_future_local(async move {
-                                let runner = obj_clone.command_runner();
                                 if crate::distrobox_downloader::resolve_bundled_distrobox_path(
-                                    &runner,
+                                    &obj_clone.file_system(),
                                 )
                                 .await
                                 .is_none()
@@ -1883,16 +1881,22 @@ mod tests {
 
     #[gtk::test]
     fn test_no_welcome_redirect_when_bundled_is_installed() {
+        use crate::fakers::NullFileSystemBuilder;
+
         let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
         let mut version_cmd = Command::new(&bundled_path);
         version_cmd.arg("version");
+
+        let file_system = NullFileSystemBuilder::new()
+            .file(&bundled_path, "fake distrobox script")
+            .build();
 
         let store = RootStore::new(
             NullCommandRunnerBuilder::new()
                 .cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()))
                 .build(),
             Settings::new_null(),
-            FileSystem::new_null(),
+            file_system,
         );
 
         store
@@ -1920,7 +1924,7 @@ mod tests {
         assert_eq!(
             store.current_view(),
             ViewType::Main,
-            "should stay on Main when bundled distrobox is installed"
+            "should not redirect to Welcome when bundled is installed"
         );
     }
 

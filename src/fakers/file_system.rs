@@ -4,7 +4,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -46,6 +48,60 @@ impl FileSystem {
         match self {
             FileSystem::Real => path.exists(),
             FileSystem::Null(null) => null.exists(path),
+        }
+    }
+
+    pub fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        match self {
+            FileSystem::Real => std::fs::create_dir_all(path),
+            FileSystem::Null(_) => Ok(()),
+        }
+    }
+
+    pub fn remove_file(&self, path: &Path) -> io::Result<()> {
+        match self {
+            FileSystem::Real => std::fs::remove_file(path),
+            FileSystem::Null(null) => null.remove_file(path),
+        }
+    }
+
+    pub fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        match self {
+            FileSystem::Real => std::fs::remove_dir_all(path),
+            FileSystem::Null(null) => null.remove_dir_all(path),
+        }
+    }
+
+    pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        match self {
+            FileSystem::Real => std::fs::rename(from, to),
+            FileSystem::Null(null) => null.rename(from, to),
+        }
+    }
+
+    pub fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        match self {
+            FileSystem::Real => {
+                let mut entries = Vec::new();
+                for entry in std::fs::read_dir(path)? {
+                    let entry = entry?;
+                    entries.push(entry.file_name().into());
+                }
+                Ok(entries)
+            }
+            FileSystem::Null(null) => null.read_dir(path),
+        }
+    }
+
+    pub fn set_unix_executable(&self, path: &Path) -> io::Result<()> {
+        match self {
+            FileSystem::Real => {
+                let metadata = std::fs::metadata(path)?;
+                let mut perms = metadata.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(path, perms)
+            }
+            FileSystem::Null(_) => Ok(()),
         }
     }
 }
@@ -94,6 +150,56 @@ impl NullFileSystem {
 
     fn exists(&self, path: &Path) -> bool {
         self.files.borrow().contains_key(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        match self.files.borrow_mut().remove(path) {
+            Some(_) => Ok(()),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{path:?}"),
+            )),
+        }
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        let mut files = self.files.borrow_mut();
+        files.retain(|k, _| !k.starts_with(path));
+        Ok(())
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let mut files = self.files.borrow_mut();
+        let to_move: Vec<(PathBuf, String)> = files
+            .iter()
+            .filter(|(k, _)| k.starts_with(from))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (old_key, _value) in &to_move {
+            files.remove(old_key);
+        }
+        for (old_key, value) in to_move {
+            let suffix = old_key.strip_prefix(from).unwrap();
+            let new_key = to.join(suffix);
+            files.insert(new_key, value);
+        }
+        Ok(())
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let files = self.files.borrow();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        for key in files.keys() {
+            let Ok(suffix) = key.strip_prefix(path) else {
+                continue;
+            };
+            if let Some(first) = suffix.iter().next() {
+                seen.insert(first.into());
+            }
+        }
+        let mut entries: Vec<PathBuf> = seen.into_iter().collect();
+        entries.sort();
+        Ok(entries)
     }
 }
 
@@ -197,5 +303,104 @@ mod tests {
         assert!(!fs.exists(path));
         fs.write(path, "x").unwrap();
         assert!(fs.exists(path));
+    }
+
+    #[test]
+    fn test_create_dir_all_real() {
+        let dir = std::env::temp_dir().join(format!("distroshelf-cda-{}", std::process::id()));
+        let fs = FileSystem::new_real();
+        assert!(!fs.exists(&dir));
+        fs.create_dir_all(&dir).unwrap();
+        assert!(dir.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_create_dir_all_null() {
+        let fs = FileSystem::new_null();
+        fs.create_dir_all(Path::new("/some/dir")).unwrap();
+    }
+
+    #[test]
+    fn test_remove_file_null() {
+        let fs = FileSystem::new_null();
+        let path = Path::new("test.txt");
+        fs.write(path, "content").unwrap();
+        assert!(fs.exists(path));
+        fs.remove_file(path).unwrap();
+        assert!(!fs.exists(path));
+    }
+
+    #[test]
+    fn test_remove_file_null_not_found() {
+        let fs = FileSystem::new_null();
+        let err = fs.remove_file(Path::new("nonexistent.txt")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_remove_dir_all_null() {
+        let fs = FileSystem::new_null();
+        fs.write(Path::new("/tmp/a/file1.txt"), "a").unwrap();
+        fs.write(Path::new("/tmp/a/file2.txt"), "b").unwrap();
+        fs.write(Path::new("/tmp/b/file3.txt"), "c").unwrap();
+        fs.remove_dir_all(Path::new("/tmp/a")).unwrap();
+        assert!(!fs.exists(Path::new("/tmp/a/file1.txt")));
+        assert!(!fs.exists(Path::new("/tmp/a/file2.txt")));
+        assert!(fs.exists(Path::new("/tmp/b/file3.txt")));
+    }
+
+    #[test]
+    fn test_rename_null() {
+        let fs = FileSystem::new_null();
+        fs.write(Path::new("/old/a/file.txt"), "hello").unwrap();
+        fs.write(Path::new("/old/b/other.txt"), "world").unwrap();
+        fs.write(Path::new("/other/keep.txt"), "keep").unwrap();
+        fs.rename(Path::new("/old"), Path::new("/new")).unwrap();
+        assert!(!fs.exists(Path::new("/old/a/file.txt")));
+        assert!(fs.exists(Path::new("/new/a/file.txt")));
+        assert_eq!(
+            fs.read_to_string(Path::new("/new/a/file.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            fs.read_to_string(Path::new("/new/b/other.txt")).unwrap(),
+            "world"
+        );
+        assert!(fs.exists(Path::new("/other/keep.txt")));
+    }
+
+    #[test]
+    fn test_read_dir_null() {
+        let fs = FileSystem::new_null();
+        fs.write(Path::new("/data/a.txt"), "a").unwrap();
+        fs.write(Path::new("/data/b.txt"), "b").unwrap();
+        fs.write(Path::new("/data/sub/c.txt"), "c").unwrap();
+        fs.write(Path::new("/other/d.txt"), "d").unwrap();
+        let entries = fs.read_dir(Path::new("/data")).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(entries.contains(&PathBuf::from("a.txt")));
+        assert!(entries.contains(&PathBuf::from("b.txt")));
+        assert!(entries.contains(&PathBuf::from("sub")));
+    }
+
+    #[test]
+    fn test_set_unix_executable_null() {
+        let fs = FileSystem::new_null();
+        fs.set_unix_executable(Path::new("/bin/tool")).unwrap();
+    }
+
+    #[test]
+    fn test_set_unix_executable_real() {
+        let dir =
+            std::env::temp_dir().join(format!("distroshelf-sue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("test.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi").unwrap();
+        let fs = FileSystem::new_real();
+        fs.set_unix_executable(&script).unwrap();
+        let meta = std::fs::metadata(&script).unwrap();
+        assert!(meta.permissions().mode() & 0o111 != 0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

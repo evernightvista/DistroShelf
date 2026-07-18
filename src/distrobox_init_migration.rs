@@ -32,8 +32,18 @@
 use std::path::{Path, PathBuf};
 
 use crate::backends::container_runtime::ContainerRuntime;
-use crate::distrobox_downloader::path_exists;
 use crate::fakers::{Command, CommandRunner};
+
+async fn path_exists(runner: &CommandRunner, path: &Path) -> bool {
+    let mut cmd = Command::new("test");
+    cmd.arg("-e");
+    cmd.arg(path);
+    runner
+        .output(cmd)
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
 /// Filename of the entrypoint script. Distrobox bind-mounts `distrobox-init`
 /// at `/usr/bin/entrypoint` and uses it as the container's entrypoint; this
