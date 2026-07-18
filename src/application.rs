@@ -32,7 +32,7 @@ use crate::DistroShelfWindow;
 use crate::backends;
 use crate::backends::DistroboxCommandRunnerResponse;
 use crate::config;
-use crate::fakers::{Command, CommandRunner, NullCommandRunnerBuilder};
+use crate::fakers::{Command, CommandRunner, NullCommandRunnerBuilder, Settings};
 use crate::models::known_distros;
 use crate::root_store::RootStore;
 
@@ -306,7 +306,15 @@ impl DistroShelfApplication {
 
         command_runner.output_tracker().enable();
 
-        let root_store = RootStore::new(command_runner.clone());
+        // The single settings instance shared by the whole app. Null store
+        // types simulate a first boot: they read and write in-memory settings
+        // instead of the real GSettings schema.
+        let settings = match distrobox_store_ty {
+            DistroboxStoreTy::Real => Settings::new_real(),
+            _ => Settings::new_null(),
+        };
+
+        let root_store = RootStore::new(command_runner.clone(), settings);
         root_store.start_background_tasks();
 
         self.set_root_store(root_store);

@@ -1,5 +1,5 @@
 use super::VersionedExecutable;
-use gtk::{gio, prelude::*};
+use crate::fakers::Settings;
 
 /// The selected source of the distrobox executable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9,7 +9,7 @@ pub enum DistroboxSource {
 }
 
 impl DistroboxSource {
-    pub fn from_setting(settings: &gio::Settings) -> Self {
+    pub fn from_setting(settings: &Settings) -> Self {
         match settings.string("distrobox-executable").as_str() {
             "bundled" => Self::Bundled,
             _ => Self::Host,

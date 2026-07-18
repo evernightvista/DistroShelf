@@ -21,7 +21,7 @@ use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime}
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::distrobox_init_migration::{StaleContainer, current_init_path, migrate_stale_path};
-use crate::fakers::{Command, CommandRunner, FdMode};
+use crate::fakers::{Command, CommandRunner, FdMode, Settings};
 use crate::gtk_utils::TypedListStore;
 use crate::models::Container;
 use crate::models::ContainerSortKey;
@@ -76,8 +76,7 @@ mod imp {
         #[property(get, set = Self::set_main_store, nullable)]
         pub main_store: RefCell<Option<MainStore>>,
 
-        #[property(get)]
-        pub settings: gio::Settings,
+        pub settings: RefCell<Settings>,
 
         pub shortcuts: gio::ListStore,
         pub shortcuts_enabled: std::cell::Cell<bool>,
@@ -123,7 +122,7 @@ mod imp {
                 tasks: TypedListStore::new(),
                 selected_task: Default::default(),
                 bundled_update_available: std::cell::Cell::new(false),
-                settings: gio::Settings::new("com.ranfdev.DistroShelf"),
+                settings: RefCell::new(Settings::new_null()),
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
                 shortcuts_enabled: std::cell::Cell::new(false),
                 main_store: RefCell::new(None),
@@ -194,7 +193,7 @@ enum SelectedTerminalResolution {
 }
 
 impl RootStore {
-    pub fn new(command_runner: CommandRunner) -> Self {
+    pub fn new(command_runner: CommandRunner, settings: Settings) -> Self {
         let this: Self = glib::Object::builder().build();
 
         this.imp()
@@ -202,6 +201,8 @@ impl RootStore {
             .set(command_runner.clone())
             .or(Err("command_runner already set"))
             .unwrap();
+
+        this.imp().settings.replace(settings);
 
         this.imp()
             .terminal_repository
@@ -382,7 +383,7 @@ impl RootStore {
                     this,
                     #[strong]
                     selected_source_clone,
-                    move |_settings, _key| {
+                    move |_key| {
                         let new_source = DistroboxSource::from_setting(&obj.settings());
                         selected_source_clone.refetch();
                         if new_source == DistroboxSource::Bundled {
@@ -490,7 +491,7 @@ impl RootStore {
     }
 
     fn selected_terminal_setting_is_empty(&self) -> bool {
-        let selected_terminal: String = self.settings().string("selected-terminal").into();
+        let selected_terminal: String = self.settings().string("selected-terminal");
         selected_terminal.is_empty()
     }
 
@@ -501,7 +502,7 @@ impl RootStore {
     }
 
     fn selected_terminal_resolution(&self) -> SelectedTerminalResolution {
-        let name_or_program: String = self.settings().string("selected-terminal").into();
+        let name_or_program: String = self.settings().string("selected-terminal");
         if name_or_program.is_empty() {
             return SelectedTerminalResolution::Empty;
         }
@@ -562,6 +563,10 @@ impl RootStore {
 
     pub fn command_runner(&self) -> CommandRunner {
         self.imp().command_runner.get().unwrap().clone()
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.imp().settings.borrow().clone()
     }
 
     pub fn terminal_repository(&self) -> TerminalRepository {
@@ -1132,8 +1137,7 @@ impl RootStore {
         }
     }
     pub fn set_selected_terminal_name(&self, name: &str) {
-        self.imp()
-            .settings
+        self.settings()
             .set_string("selected-terminal", name)
             .expect("Failed to save setting");
     }
@@ -1337,7 +1341,7 @@ mod tests {
                         .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "Command not found"))
                 })
                 .build();
-            let store = RootStore::new(runner);
+            let store = RootStore::new(runner, Settings::new_null());
 
             let resolved_path: Result<String, backends::Error> =
                 smol::block_on(store.resolve_host_path(input_path));
@@ -1352,7 +1356,10 @@ mod tests {
 
     #[gtk::test]
     fn test_selected_terminal_setting_is_empty() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store
             .settings()
@@ -1380,7 +1387,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store
             .settings()
@@ -1400,7 +1407,7 @@ mod tests {
                     .is_loading()
         });
 
-        let selected_terminal: String = store.settings().string("selected-terminal").into();
+        let selected_terminal: String = store.settings().string("selected-terminal");
         assert_eq!(selected_terminal, "Definitely Not A Real Terminal");
     }
 
@@ -1417,7 +1424,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store
             .settings()
@@ -1427,11 +1434,11 @@ mod tests {
         store.ensure_selected_terminal_after_load();
 
         spin_main_context_until(Duration::from_millis(300), || {
-            let selected: String = store.settings().string("selected-terminal").into();
+            let selected: String = store.settings().string("selected-terminal");
             selected == "Konsole"
         });
 
-        let selected_terminal: String = store.settings().string("selected-terminal").into();
+        let selected_terminal: String = store.settings().string("selected-terminal");
         assert_eq!(selected_terminal, "Konsole");
     }
 
@@ -1448,7 +1455,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store
             .settings()
@@ -1472,7 +1479,7 @@ mod tests {
 
         spin_main_context_until(Duration::from_millis(150), || false);
 
-        let selected_terminal: String = store.settings().string("selected-terminal").into();
+        let selected_terminal: String = store.settings().string("selected-terminal");
         assert!(selected_terminal.is_empty());
     }
 
@@ -1489,7 +1496,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store
             .settings()
@@ -1521,7 +1528,7 @@ mod tests {
                     .is_loading()
         });
 
-        let selected_terminal: String = store.settings().string("selected-terminal").into();
+        let selected_terminal: String = store.settings().string("selected-terminal");
         assert_eq!(selected_terminal, "Definitely Not A Real Terminal");
     }
 
@@ -1538,7 +1545,7 @@ mod tests {
                 "'konsole'\n",
             )
             .build();
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store
             .settings()
@@ -1560,17 +1567,20 @@ mod tests {
         store.terminal_repository().load_all();
 
         spin_main_context_until(Duration::from_millis(350), || {
-            let selected: String = store.settings().string("selected-terminal").into();
+            let selected: String = store.settings().string("selected-terminal");
             selected == "Konsole"
         });
 
-        let selected_terminal: String = store.settings().string("selected-terminal").into();
+        let selected_terminal: String = store.settings().string("selected-terminal");
         assert_eq!(selected_terminal, "Konsole");
     }
 
     #[gtk::test]
     fn test_selected_terminal_resolution_is_missing_while_sources_loading() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store
             .settings()
@@ -1592,7 +1602,10 @@ mod tests {
 
     #[gtk::test]
     fn test_selected_terminal_resolution_supports_legacy_program_setting() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store
             .settings()
@@ -1609,7 +1622,10 @@ mod tests {
 
     #[gtk::test]
     fn test_download_distrobox_returns_existing_active_task() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
         let existing_task = DistroboxTask::new("system", "Downloading Distrobox", |_task| async {
             pending::<anyhow::Result<()>>().await
         });
@@ -1623,7 +1639,10 @@ mod tests {
 
     #[gtk::test]
     fn test_shortcuts_toggle_is_idempotent() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         assert_eq!(
             store.shortcuts_model().n_items(),
@@ -1651,7 +1670,10 @@ mod tests {
 
     #[gtk::test]
     fn test_host_distrobox_version_detects_no_version_with_null_runner() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store.host_distrobox_version().refetch();
 
@@ -1678,7 +1700,10 @@ mod tests {
         use std::sync::atomic::AtomicBool;
         use std::sync::atomic::Ordering;
 
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store
             .settings()
@@ -1717,6 +1742,7 @@ mod tests {
                     || Ok("/usr/bin/distrobox".to_string()),
                 )
                 .build(),
+            Settings::new_null(),
         );
 
         store
@@ -1749,7 +1775,10 @@ mod tests {
 
     #[gtk::test]
     fn test_welcome_view_shown_when_host_distrobox_not_available() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store
             .settings()
@@ -1798,6 +1827,7 @@ mod tests {
             NullCommandRunnerBuilder::new()
                 .cmd_full_with_status(test_cmd, ExitStatusExt::from_raw(1), || Ok(String::new()))
                 .build(),
+            Settings::new_null(),
         );
 
         store
@@ -1839,6 +1869,7 @@ mod tests {
             NullCommandRunnerBuilder::new()
                 .cmd_full(version_cmd, || Ok("distrobox: 1.8.2.5".to_string()))
                 .build(),
+            Settings::new_null(),
         );
 
         store
@@ -1887,7 +1918,7 @@ mod tests {
             .fallback(ExitStatusExt::from_raw(1))
             .build();
 
-        let store = RootStore::new(runner);
+        let store = RootStore::new(runner, Settings::new_null());
 
         store.start_background_tasks();
 
@@ -1923,7 +1954,10 @@ mod tests {
 
     #[gtk::test]
     fn test_initial_view_is_main_with_main_store() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         assert_eq!(store.current_view(), ViewType::Main);
         assert!(
@@ -1934,7 +1968,10 @@ mod tests {
 
     #[gtk::test]
     fn test_set_current_view_welcome_swaps_stores() {
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         store.set_current_view(ViewType::Welcome);
         assert_eq!(store.current_view(), ViewType::Welcome);
@@ -1956,7 +1993,10 @@ mod tests {
         use std::cell::Cell;
         use std::rc::Rc;
 
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
 
         let view_count = Rc::new(Cell::new(0u32));
         let main_count = Rc::new(Cell::new(0u32));
@@ -1981,7 +2021,10 @@ mod tests {
         use std::cell::Cell;
         use std::rc::Rc;
 
-        let store = RootStore::new(NullCommandRunnerBuilder::new().build());
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new().build(),
+            Settings::new_null(),
+        );
         let main_before = store.main_store().expect("main_store should exist");
 
         let view_count = Rc::new(Cell::new(0u32));

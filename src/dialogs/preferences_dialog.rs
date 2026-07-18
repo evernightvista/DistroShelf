@@ -150,7 +150,7 @@ mod imp {
             page.add(&terminal_group);
 
             // Distrobox Group (general settings)
-            let settings = gio::Settings::new("com.ranfdev.DistroShelf");
+            let settings = obj.root_store().settings();
 
             let distrobox_group = adw::PreferencesGroup::new();
             distrobox_group.set_title(&gettext("Distrobox"));
@@ -297,7 +297,7 @@ mod imp {
                 clone!(
                     #[weak(rename_to = this)]
                     obj,
-                    move |_, _| {
+                    move |_key| {
                         this.sync_selection();
                     }
                 ),

@@ -10,7 +10,11 @@ use vte4::prelude::*;
 
 use crate::i18n::gettext;
 use crate::widgets::DistroShelfWindow;
-use crate::{fakers::CommandRunner, gtk_utils::ColorPalette, models::RootStore};
+use crate::{
+    fakers::{CommandRunner, Settings},
+    gtk_utils::ColorPalette,
+    models::RootStore,
+};
 use std::cell::OnceCell;
 
 use gtk::glib::{Properties, derived_properties};
@@ -71,7 +75,10 @@ impl Default for IntegratedTerminal {
     fn default() -> Self {
         let obj: Self = glib::Object::builder()
             .property("container_name", "default")
-            .property("root_store", RootStore::new(CommandRunner::new_null()))
+            .property(
+                "root_store",
+                RootStore::new(CommandRunner::new_null(), Settings::new_null()),
+            )
             .build();
         obj
     }

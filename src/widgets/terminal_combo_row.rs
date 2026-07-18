@@ -52,7 +52,7 @@ mod imp {
                     let root_store = obj.root_store();
                     let terminal_repository = root_store.terminal_repository();
                     let selected_terminal_setting: String =
-                        root_store.settings().string("selected-terminal").into();
+                        root_store.settings().string("selected-terminal");
                     let loading_terminals = terminal_repository.json_terminals_query().is_loading()
                         || terminal_repository.flatpak_terminals_query().is_loading();
 

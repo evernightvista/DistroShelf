@@ -2,7 +2,6 @@ use futures::StreamExt;
 use futures::TryFutureExt;
 use glib::Properties;
 use glib::subclass::prelude::*;
-use gtk::gio;
 use gtk::glib;
 use gtk::glib::clone;
 use gtk::prelude::*;
@@ -17,7 +16,7 @@ use crate::backends::Status;
 use crate::backends::container_runtime::DetectedRuntime;
 use crate::backends::podman::PodmanEvent;
 use crate::distrobox_init_migration::{StaleContainer, current_init_path, find_stale_containers};
-use crate::fakers::{Command, CommandRunner};
+use crate::fakers::{Command, CommandRunner, Settings};
 use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
 use crate::models::Container;
 use crate::models::ContainerSortKey;
@@ -47,7 +46,7 @@ mod imp {
         #[property(get, set, builder(ContainerSortKey::default()))]
         pub containers_sort_key: RefCell<ContainerSortKey>,
 
-        pub settings: OnceCell<gio::Settings>,
+        pub settings: OnceCell<Settings>,
 
         /// Containers whose baked-in `distrobox-init` path no longer exists
         pub stale_containers: TypedListStore<glib::BoxedAnyObject>,
@@ -105,7 +104,7 @@ impl MainStore {
         runtime_query: Query<DetectedRuntime>,
         distrobox_version: Query<Option<DistroboxExecutable>>,
         containers_sort_key: ContainerSortKey,
-        settings: gio::Settings,
+        settings: Settings,
     ) -> Self {
         let this: Self = glib::Object::builder().build();
 
@@ -328,7 +327,7 @@ impl MainStore {
         self.imp().command_runner.get().unwrap().clone()
     }
 
-    pub fn settings(&self) -> &gio::Settings {
+    pub fn settings(&self) -> &Settings {
         self.imp().settings.get().unwrap()
     }
 
@@ -575,8 +574,8 @@ mod tests {
         })
     }
 
-    fn test_settings() -> gio::Settings {
-        gio::Settings::new("com.ranfdev.DistroShelf")
+    fn test_settings() -> Settings {
+        Settings::new_null()
     }
 
     fn container_info(
