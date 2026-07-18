@@ -30,7 +30,6 @@ use crate::models::DistroboxTask;
 use crate::models::MainStore;
 use crate::models::VersionedExecutable;
 use crate::models::ViewType;
-use crate::models::WelcomeStore;
 use crate::models::{DialogParams, DialogType};
 use crate::query::Query;
 
@@ -75,10 +74,6 @@ mod imp {
         /// The active main-view state. `None` when Welcome is showing.
         #[property(get, set = Self::set_main_store, nullable)]
         pub main_store: RefCell<Option<MainStore>>,
-
-        /// The active welcome-view state. `None` when Main is showing.
-        #[property(get, set = Self::set_welcome_store, nullable)]
-        pub welcome_store: RefCell<Option<WelcomeStore>>,
 
         #[property(get)]
         pub settings: gio::Settings,
@@ -128,7 +123,6 @@ mod imp {
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
                 shortcuts_enabled: std::cell::Cell::new(false),
                 main_store: RefCell::new(None),
-                welcome_store: RefCell::new(None),
             }
         }
     }
@@ -151,10 +145,6 @@ mod imp {
             self.main_store.replace(value);
         }
 
-        fn set_welcome_store(&self, value: Option<WelcomeStore>) {
-            self.welcome_store.replace(value);
-        }
-
         fn set_current_view(&self, value: ViewType) {
             let obj = self.obj();
             if *self.current_view.borrow() == value {
@@ -171,19 +161,13 @@ mod imp {
                         );
                         *self.main_store.borrow_mut() = Some(main);
                     }
-                    *self.welcome_store.borrow_mut() = None;
                 }
                 ViewType::Welcome => {
-                    if self.welcome_store.borrow().is_none() {
-                        let welcome = WelcomeStore::new(&obj);
-                        *self.welcome_store.borrow_mut() = Some(welcome);
-                    }
                     *self.main_store.borrow_mut() = None;
                 }
             }
             obj.notify("current-view");
             obj.notify("main-store");
-            obj.notify("welcome-store");
         }
     }
 }
@@ -426,7 +410,6 @@ impl RootStore {
         // Main. Notify manually so listeners wired after construction pick up
         // the initial state.
         this.notify("main-store");
-        this.notify("welcome-store");
 
         this
     }
@@ -1926,10 +1909,6 @@ mod tests {
             store.main_store().is_some(),
             "main_store should exist on Main view"
         );
-        assert!(
-            store.welcome_store().is_none(),
-            "welcome_store should not exist on Main view"
-        );
     }
 
     #[gtk::test]
@@ -1938,10 +1917,6 @@ mod tests {
 
         store.set_current_view(ViewType::Welcome);
         assert_eq!(store.current_view(), ViewType::Welcome);
-        assert!(
-            store.welcome_store().is_some(),
-            "welcome_store should be created when switching to Welcome"
-        );
         assert!(
             store.main_store().is_none(),
             "main_store should be dropped when switching to Welcome"
@@ -1952,10 +1927,6 @@ mod tests {
         assert!(
             store.main_store().is_some(),
             "main_store should be recreated when switching back to Main"
-        );
-        assert!(
-            store.welcome_store().is_none(),
-            "welcome_store should be dropped when switching back to Main"
         );
     }
 
@@ -1968,7 +1939,6 @@ mod tests {
 
         let view_count = Rc::new(Cell::new(0u32));
         let main_count = Rc::new(Cell::new(0u32));
-        let welcome_count = Rc::new(Cell::new(0u32));
 
         store.connect_notify_local(Some("current-view"), {
             let view_count = view_count.clone();
@@ -1978,20 +1948,11 @@ mod tests {
             let main_count = main_count.clone();
             move |_, _| main_count.set(main_count.get() + 1)
         });
-        store.connect_notify_local(Some("welcome-store"), {
-            let welcome_count = welcome_count.clone();
-            move |_, _| welcome_count.set(welcome_count.get() + 1)
-        });
 
         store.set_current_view(ViewType::Welcome);
 
         assert_eq!(view_count.get(), 1, "notify::current-view should fire once");
         assert_eq!(main_count.get(), 1, "notify::main-store should fire once");
-        assert_eq!(
-            welcome_count.get(),
-            1,
-            "notify::welcome-store should fire once"
-        );
     }
 
     #[gtk::test]
@@ -2008,12 +1969,10 @@ mod tests {
             move |_, _| view_count.set(view_count.get() + 1)
         });
         let store_count = Rc::new(Cell::new(0u32));
-        for prop in ["main-store", "welcome-store"] {
-            store.connect_notify_local(Some(prop), {
-                let store_count = store_count.clone();
-                move |_, _| store_count.set(store_count.get() + 1)
-            });
-        }
+        store.connect_notify_local(Some("main-store"), {
+            let store_count = store_count.clone();
+            move |_, _| store_count.set(store_count.get() + 1)
+        });
 
         store.set_current_view(ViewType::Main);
 

@@ -10,7 +10,6 @@ pub mod root_store;
 pub mod tagged_object;
 pub mod versioned_executable;
 pub mod view_type;
-pub mod welcome_store;
 
 pub use container::Container;
 pub use container_sort_key::ContainerSortKey;
@@ -23,4 +22,3 @@ pub use main_store::MainStore;
 pub use root_store::RootStore;
 pub use versioned_executable::VersionedExecutable;
 pub use view_type::ViewType;
-pub use welcome_store::WelcomeStore;
