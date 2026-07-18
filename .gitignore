@@ -7,3 +7,4 @@ _build/
 .env
 src/config.rs
 plans/
+.opencode/state/
