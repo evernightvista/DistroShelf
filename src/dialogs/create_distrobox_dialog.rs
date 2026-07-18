@@ -268,7 +268,9 @@ impl CreateDistroboxDialog {
             .property("clone-src", clone_src)
             .build();
 
-        this.root_store().images_query().connect_success(clone!(
+        let main_store = this.root_store().main_store()
+            .expect("CreateDistroboxDialog requires Main view");
+        main_store.images_query().connect_success(clone!(
             #[weak]
             this,
             move |images| {
@@ -278,7 +280,7 @@ impl CreateDistroboxDialog {
                 string_list.splice(0, 0, &new_items);
             }
         ));
-        this.root_store().images_query().refetch();
+        main_store.images_query().refetch();
 
         glib::MainContext::ref_thread_default().spawn_local(clone!(
             #[weak]
@@ -290,13 +292,13 @@ impl CreateDistroboxDialog {
         ));
 
         let this_clone = this.clone();
-        this.root_store()
+        main_store
             .downloaded_images_query()
             .connect_success(move |images| {
                 *this_clone.imp().downloaded_tags.borrow_mut() = images.clone();
             });
 
-        this.root_store().downloaded_images_query().refetch();
+        main_store.downloaded_images_query().refetch();
 
         this
     }
@@ -1109,13 +1111,15 @@ impl CreateDistroboxDialog {
         }
         let name = match CreateArgName::new(&imp.name_row.text()) {
             Ok(name) => {
-                for container in self.root_store().containers().iter() {
-                    if container.name() == imp.name_row.text() {
-                        errors.add_name_error(format!(
-                            "Container with name '{}' already exists",
-                            name
-                        ));
-                        break;
+                if let Some(containers) = self.root_store().main_store().map(|m| m.containers().clone()) {
+                    for container in containers.iter() {
+                        if container.name() == imp.name_row.text() {
+                            errors.add_name_error(format!(
+                                "Container with name '{}' already exists",
+                                name
+                            ));
+                            break;
+                        }
                     }
                 }
                 Some(name)

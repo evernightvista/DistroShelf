@@ -23,13 +23,16 @@ use crate::dialogs::{
     TaskManagerDialog,
 };
 use crate::i18n::{gettext, ngettext};
-use crate::models::{Container, DialogParams, DialogType};
+use crate::models::Container;
 use crate::models::ContainerSortKey;
+use crate::models::DialogParams;
+use crate::models::DialogType;
 use crate::root_store::RootStore;
 use crate::widgets::{IntegratedTerminal, SidebarRow, TasksButton};
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use glib::{Properties, derived_properties};
+use glib::Properties;
+use glib::derived_properties;
 use gtk::gio::ActionEntry;
 use gtk::glib::clone;
 use gtk::{gio, glib};
@@ -84,6 +87,7 @@ mod imp {
         #[template_child]
         pub terminal_bin: TemplateChild<adw::Bin>,
         pub terminals_by_container: RefCell<HashMap<String, IntegratedTerminal>>,
+        pub sort_key_handler_id: RefCell<Option<glib::SignalHandlerId>>,
     }
 
     #[glib::object_subclass]
@@ -132,26 +136,15 @@ impl DistroShelfWindow {
         this.imp()
             .content_state_stack
             .set_visible_child_name("no_content");
+
+        // Bind main-store changes for sidebar/model rebinding
+        this.bind_main_store();
         let this_clone = this.clone();
         this.root_store()
-            .selected_container_model()
-            .connect_selected_item_notify(move |model| {
-                if let Some(container) = model
-                    .selected_item()
-                    .and_then(|obj| obj.downcast::<Container>().ok())
-                {
-                    this_clone.update_container(&container);
-                    this_clone
-                        .imp()
-                        .content_state_stack
-                        .set_visible_child_name("content");
-                } else {
-                    this_clone
-                        .imp()
-                        .content_state_stack
-                        .set_visible_child_name("no_content");
-                }
+            .connect_main_store_notify(move |_root_store| {
+                this_clone.bind_main_store();
             });
+
         let this_clone = this.clone();
         this.root_store()
             .connect_current_view_notify(move |root_store| {
@@ -201,12 +194,10 @@ impl DistroShelfWindow {
         this.build_migration_banner();
         this.root_store().load_containers();
 
-        // Refresh data when the window regains focus: the user may have run
-        // distrobox commands externally, or installed podman/distrobox outside
-        // the app. Staleness-gated so rapid focus changes don't hammer backends.
-        this.root_store()
-            .containers_query()
-            .refetch_on_focus(&this, Duration::from_secs(5));
+        // Refresh data when the window regains focus
+        if let Some(m) = this.root_store().main_store() {
+            m.containers_query().refetch_on_focus(&this, Duration::from_secs(5));
+        }
         this.root_store()
             .container_runtime()
             .refetch_on_focus(&this, Duration::from_secs(30));
@@ -241,6 +232,62 @@ impl DistroShelfWindow {
         });
 
         this
+    }
+
+    /// (Re-)binds sidebar, selection tracking, stale-banner, and focus refetch
+    /// when `main_store` appears or changes.
+    fn bind_main_store(&self) {
+        let imp = self.imp();
+        let root_store = self.root_store();
+
+        let Some(main) = root_store.main_store() else {
+            // No main store — clear the sidebar model
+            imp.sidebar_list_view
+                .set_model(None::<&gtk::NoSelection>);
+            imp.content_state_stack
+                .set_visible_child_name("no_content");
+            return;
+        };
+
+        // Bind sidebar to MainStore's selection model
+        let sel_model = main.selected_container_model();
+        imp.sidebar_list_view
+            .set_model(Some(&sel_model));
+
+        let this_clone = self.clone();
+        sel_model.connect_selected_item_notify(move |model| {
+            if let Some(container) = model
+                .selected_item()
+                .and_then(|obj| obj.downcast::<Container>().ok())
+            {
+                this_clone.update_container(&container);
+                this_clone
+                    .imp()
+                    .content_state_stack
+                    .set_visible_child_name("content");
+            } else {
+                this_clone
+                    .imp()
+                    .content_state_stack
+                    .set_visible_child_name("no_content");
+            }
+        });
+
+        // Toggle sidebar stack based on container count
+        let this_clone = self.clone();
+        main.containers()
+            .inner()
+            .connect_items_changed(move |list, _position, _removed, _added| {
+                let visible_child_name = if list.n_items() == 0 {
+                    "no-distroboxes"
+                } else {
+                    "distroboxes"
+                };
+                this_clone
+                    .imp()
+                    .sidebar_stack
+                    .set_visible_child_name(visible_child_name);
+            });
     }
 
     fn setup_gactions(&self) {
@@ -321,24 +368,34 @@ impl DistroShelfWindow {
                 if let Some(v) = param {
                     let s: String = v.get().unwrap();
                     if let Some(key) = ContainerSortKey::from_str(&s) {
-                        this.root_store().set_containers_sort_key(key);
+                        if let Some(main) = this.root_store().main_store() {
+                            main.set_containers_sort_key(key);
+                        }
                     }
                 }
             }
         ));
         self.add_action(&sort_action);
 
-        self.root_store().connect_containers_sort_key_notify(clone!(
-            #[weak(rename_to = this)]
-            self,
-            move |store| {
-                let sort_key = store.containers_sort_key();
-                if let Some(action) = this.lookup_action("sort-key") {
-                    action.change_state(&sort_key.to_str().to_variant());
+        // Watch sort key changes on active main_store
+        let this_clone = self.clone();
+        self.root_store()
+            .connect_main_store_notify(move |root_store| {
+                if let Some(main) = root_store.main_store() {
+                    let this = this_clone.clone();
+                    let handler_id = main.connect_containers_sort_key_notify(move |main| {
+                        let sort_key = main.containers_sort_key();
+                        if let Some(action) = this.lookup_action("sort-key") {
+                            action.change_state(&sort_key.to_str().to_variant());
+                        }
+                    });
+                    // Store handler so it lives as long as the window
+                    // (old handler auto-disconnects when old MainStore drops)
+                    this_clone.imp().sort_key_handler_id.replace(Some(handler_id));
                 }
-            }
-        ));
+            });
     }
+
     fn build_sidebar(&self) {
         let imp = self.imp();
 
@@ -381,8 +438,6 @@ impl DistroShelfWindow {
         });
 
         imp.sidebar_list_view.set_factory(Some(&factory));
-        imp.sidebar_list_view
-            .set_model(Some(&self.root_store().selected_container_model()));
         imp.sidebar_list_view.connect_activate(clone!(
             #[weak(rename_to = this)]
             self,
@@ -390,25 +445,11 @@ impl DistroShelfWindow {
                 this.imp().split_view.set_show_content(true);
             }
         ));
-        let this = self.clone();
-        self.root_store()
-            .containers()
-            .inner()
-            .connect_items_changed(move |list, _position, _removed, _added| {
-                let visible_child_name = if list.n_items() == 0 {
-                    "no-distroboxes"
-                } else {
-                    "distroboxes"
-                };
-                this.imp()
-                    .sidebar_stack
-                    .set_visible_child_name(visible_child_name);
-            });
 
         // Add tasks button and update button to the bottom of the sidebar
         let sidebar_bottom_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
-        // "Update Distrobox" button — visible only when a bundled update is available
+        // "Update Distrobox" button
         let update_button = gtk::Button::builder()
             .label(gettext("Update Distrobox"))
             .build();
@@ -450,41 +491,52 @@ impl DistroShelfWindow {
         self.imp().toast_overlay.add_toast(toast);
     }
 
-    /// Shows a banner when some containers reference a stale
-    /// `distrobox-init` path, offering a one-click migration (see
-    /// docs/distrobox-init-migration.md).
     fn build_migration_banner(&self) {
         let banner = self.imp().migration_banner.clone();
 
-        self.root_store()
-            .stale_containers()
-            .inner()
-            .connect_items_changed(clone!(
-                #[weak]
-                banner,
-                move |list, _position, _removed, _added| {
-                    let count = list.n_items();
-                    if count > 0 {
-                        // TRANSLATORS: "migration" here means repairing containers
-                        // that reference a distrobox-init file which no longer
-                        // exists (e.g. after a Distrobox update); no container
-                        // data is touched.
-                        banner.set_title(&ngettext(
-                            "A container points to an outdated Distrobox and needs migration",
-                            "Some containers point to an outdated Distrobox and need migration",
-                            count,
-                        ));
+        let connect_stale = |banner: &adw::Banner, main: &crate::models::MainStore| {
+            main.stale_containers()
+                .inner()
+                .connect_items_changed(clone!(
+                    #[weak]
+                    banner,
+                    move |list, _position, _removed, _added| {
+                        let count = list.n_items();
+                        if count > 0 {
+                            banner.set_title(&ngettext(
+                                "A container points to an outdated Distrobox and needs migration",
+                                "Some containers point to an outdated Distrobox and need migration",
+                                count,
+                            ));
+                        }
+                        banner.set_revealed(count > 0);
                     }
-                    banner.set_revealed(count > 0);
-                }
-            ));
+                ));
+        };
+
+        // Wire up the current MainStore (connect_main_store_notify fires only
+        // on changes, so the initial store is never caught by the callback below)
+        if let Some(main) = self.root_store().main_store() {
+            connect_stale(&banner, &main);
+        }
+
+        // Re-bind when main_store changes
+        let banner_for_notify = banner.clone();
+        self.root_store().connect_main_store_notify(move |root_store| {
+            if let Some(main) = root_store.main_store() {
+                connect_stale(&banner_for_notify, &main);
+            } else {
+                banner_for_notify.set_revealed(false);
+            }
+        });
 
         banner.connect_button_clicked(clone!(
             #[weak(rename_to = this)]
             self,
             move |_| {
-                let task = this.root_store().migrate_stale_containers();
-                this.root_store().view_task(&task);
+                if let Some(task) = this.root_store().migrate_stale_containers() {
+                    this.root_store().view_task(&task);
+                }
             }
         ));
     }
@@ -537,9 +589,10 @@ impl DistroShelfWindow {
                 move |dialog, _| {
                     if let Some(container) = this.root_store().selected_container() {
                         this.root_store().delete_container(&container);
-                        this.root_store()
-                            .selected_container_model()
-                            .set_selected(gtk::INVALID_LIST_POSITION);
+                        if let Some(main) = this.root_store().main_store() {
+                            main.selected_container_model()
+                                .set_selected(gtk::INVALID_LIST_POSITION);
+                        }
                     }
                     dialog.close();
                 }
@@ -552,7 +605,6 @@ impl DistroShelfWindow {
     fn build_install_package_dialog(&self) {
         if let Some(container) = self.root_store().selected_container() {
             let root_store = self.root_store();
-            // Show file chooser and install package using the appropriate command
             let file_dialog = gtk::FileDialog::builder()
                 .title(gettext("Select Package"))
                 .build();

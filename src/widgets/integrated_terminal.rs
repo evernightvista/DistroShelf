@@ -222,7 +222,10 @@ impl IntegratedTerminal {
 
                 // Prepare the shell command via the Distrobox backend (uses injected factory)
                 let name = this.container_name();
-                let enter_cmd = root_store.distrobox().enter_cmd(&name);
+                let main = root_store
+                    .main_store()
+                    .expect("IntegratedTerminal requires Main view");
+                let enter_cmd = main.distrobox().enter_cmd(&name);
                 let command_runner = root_store.command_runner();
                 let shell: Vec<OsString> = command_runner.wrap_command(enter_cmd).to_vec();
                 let shell_args = shell

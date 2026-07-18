@@ -18,20 +18,21 @@ use tracing::{debug, warn};
 use crate::backends::Distrobox;
 use crate::backends::Status;
 use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime};
-use crate::backends::podman::PodmanEvent;
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::distrobox_init_migration::{
-    StaleContainer, current_init_path, find_stale_containers, migrate_stale_path,
+    StaleContainer, current_init_path, migrate_stale_path,
 };
 use crate::fakers::{Command, CommandRunner, FdMode};
-use crate::gtk_utils::{TypedListStore, reconcile_list_by_key};
+use crate::gtk_utils::TypedListStore;
 use crate::models::DistroboxExecutable;
 use crate::models::DistroboxSource;
 use crate::models::DistroboxTask;
+use crate::models::MainStore;
 use crate::models::VersionedExecutable;
 use crate::models::ViewType;
-use crate::models::{Container, ContainerSortKey};
+use crate::models::WelcomeStore;
+use crate::models::Container;
 use crate::models::{DialogParams, DialogType};
 use crate::query::Query;
 
@@ -53,8 +54,7 @@ const SHORTCUT_DEFINITIONS: [(&str, &str); 13] = [
 
 mod imp {
     use crate::{
-        backends::container_runtime::DetectedRuntime, models::ContainerSortKey,
-        models::VersionedExecutable, query::Query,
+        backends::container_runtime::DetectedRuntime, models::VersionedExecutable, query::Query,
     };
 
     use super::*;
@@ -62,7 +62,6 @@ mod imp {
     #[derive(Properties)]
     #[properties(wrapper_type = super::RootStore)]
     pub struct RootStore {
-        pub distrobox: OnceCell<crate::backends::Distrobox>,
         pub terminal_repository: RefCell<TerminalRepository>,
         pub command_runner: OnceCell<CommandRunner>,
         pub container_runtime: Query<DetectedRuntime>,
@@ -70,30 +69,18 @@ mod imp {
         pub distrobox_version: RefCell<Query<Option<DistroboxExecutable>>>,
         pub bundled_distrobox_version: Query<Option<VersionedExecutable>>,
         pub host_distrobox_version: Query<Option<VersionedExecutable>>,
-        pub images_query: Query<Vec<String>>,
-        pub downloaded_images_query: Query<HashSet<String>>,
-        pub containers_query: Query<Vec<Container>>,
-
-        pub containers: TypedListStore<Container>,
-        pub selected_container_model: OnceCell<gtk::SingleSelection>,
-        pub sorted_container_model: OnceCell<gtk::SortListModel>,
-        pub containers_sorter: OnceCell<gtk::CustomSorter>,
-
-        #[property(get, set, builder(ContainerSortKey::default()))]
-        pub containers_sort_key: RefCell<ContainerSortKey>,
 
         pub tasks: TypedListStore<DistroboxTask>,
         #[property(get, set, nullable)]
         pub selected_task: RefCell<Option<DistroboxTask>>,
 
-        /// Containers whose baked-in `distrobox-init` path no longer exists
-        /// (see docs/distrobox-init-migration.md). Items are
-        /// `BoxedAnyObject`s wrapping [`StaleContainer`].
-        pub stale_containers: TypedListStore<glib::BoxedAnyObject>,
-        /// Guards against concurrent stale-container checks; a check
-        /// requested while one is running is deferred, not dropped.
-        pub stale_check_running: std::cell::Cell<bool>,
-        pub stale_check_pending: std::cell::Cell<bool>,
+        /// The active main-view state. `None` when Welcome is showing.
+        #[property(get, set = Self::set_main_store, nullable)]
+        pub main_store: RefCell<Option<MainStore>>,
+
+        /// The active welcome-view state. `None` when Main is showing.
+        #[property(get, set = Self::set_welcome_store, nullable)]
+        pub welcome_store: RefCell<Option<WelcomeStore>>,
 
         #[property(get)]
         pub settings: gio::Settings,
@@ -101,7 +88,7 @@ mod imp {
         pub shortcuts: gio::ListStore,
         pub shortcuts_enabled: std::cell::Cell<bool>,
 
-        #[property(get, set, builder(ViewType::default()))]
+        #[property(get, set = Self::set_current_view, builder(ViewType::default()))]
         current_view: RefCell<ViewType>,
         #[property(get, set, builder(DialogType::default()))]
         current_dialog: RefCell<DialogType>,
@@ -116,7 +103,6 @@ mod imp {
     impl Default for RootStore {
         fn default() -> Self {
             Self {
-                containers: TypedListStore::new(),
                 command_runner: OnceCell::new(),
                 container_runtime: Query::new("container_runtime".into(), || async {
                     anyhow::bail!("Container runtime not initialized")
@@ -124,14 +110,9 @@ mod imp {
                 terminal_repository: RefCell::new(TerminalRepository::new(
                     CommandRunner::new_null(),
                 )),
-                selected_container_model: OnceCell::new(),
-                sorted_container_model: OnceCell::new(),
-                containers_sorter: OnceCell::new(),
-                containers_sort_key: RefCell::new(ContainerSortKey::default()),
                 current_view: Default::default(),
                 current_dialog: Default::default(),
                 dialog_params: Default::default(),
-                distrobox: Default::default(),
                 distrobox_version: RefCell::new(Query::new("distrobox_version".into(), || async {
                     Ok(None)
                 })),
@@ -141,20 +122,14 @@ mod imp {
                 host_distrobox_version: Query::new("host_distrobox_version".into(), || async {
                     Ok(None)
                 }),
-                images_query: Query::new("images".into(), || async { Ok(vec![]) }),
-                downloaded_images_query: Query::new("downloaded_images".into(), || async {
-                    Ok(HashSet::new())
-                }),
-                containers_query: Query::new("containers".into(), || async { Ok(vec![]) }),
                 tasks: TypedListStore::new(),
                 selected_task: Default::default(),
-                stale_containers: TypedListStore::new(),
-                stale_check_running: std::cell::Cell::new(false),
-                stale_check_pending: std::cell::Cell::new(false),
                 bundled_update_available: std::cell::Cell::new(false),
                 settings: gio::Settings::new("com.ranfdev.DistroShelf"),
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
                 shortcuts_enabled: std::cell::Cell::new(false),
+                main_store: RefCell::new(None),
+                welcome_store: RefCell::new(None),
             }
         }
     }
@@ -163,9 +138,6 @@ mod imp {
     impl ObjectImpl for RootStore {
         fn constructed(&self) {
             self.parent_constructed();
-            // Settings-change handler for distrobox-executable is set up in
-            // RootStore::new() where it has access to the selected_source query
-            // that drives the switch_map derivation.
         }
     }
 
@@ -173,6 +145,47 @@ mod imp {
     impl ObjectSubclass for RootStore {
         const NAME: &'static str = "RootStore";
         type Type = super::RootStore;
+    }
+
+    impl RootStore {
+        fn set_main_store(&self, value: Option<MainStore>) {
+            self.main_store.replace(value);
+        }
+
+        fn set_welcome_store(&self, value: Option<WelcomeStore>) {
+            self.welcome_store.replace(value);
+        }
+
+        fn set_current_view(&self, value: ViewType) {
+            let obj = self.obj();
+            if *self.current_view.borrow() == value {
+                return;
+            }
+            *self.current_view.borrow_mut() = value;
+            match value {
+                ViewType::Main => {
+                    if self.main_store.borrow().is_none() {
+                        let main = MainStore::new(
+                            obj.command_runner(),
+                            obj.container_runtime(),
+                            obj.distrobox_version(),
+                        );
+                        *self.main_store.borrow_mut() = Some(main);
+                    }
+                    *self.welcome_store.borrow_mut() = None;
+                }
+                ViewType::Welcome => {
+                    if self.welcome_store.borrow().is_none() {
+                        let welcome = WelcomeStore::new(&obj);
+                        *self.welcome_store.borrow_mut() = Some(welcome);
+                    }
+                    *self.main_store.borrow_mut() = None;
+                }
+            }
+            obj.notify("current-view");
+            obj.notify("main-store");
+            obj.notify("welcome-store");
+        }
     }
 }
 
@@ -229,83 +242,7 @@ impl RootStore {
                 this_clone.ensure_selected_terminal_after_load();
             });
 
-        // Build a CmdFactory that will be injected into the Distrobox backend. The factory
-        // is created here (root_store) so the distrobox module does not depend on `gio::Settings`.
-        // The distrobox_version query is the single source of truth for the resolved path.
-        // When it is not yet available (startup, setting-change transition), fall back to a
-        // bare "distrobox" and rely on PATH resolution.
-        let this_clone = this.clone();
-        let cmd_factory: crate::backends::distrobox::command::CmdFactory = Rc::new(move || {
-            if let Some(Some(exe)) = this_clone.distrobox_version().data() {
-                debug_assert!(!exe.path().is_empty(), "resolved distrobox path must not be empty");
-                return crate::fakers::Command::new(exe.path().to_owned());
-            }
-            warn!("distrobox_version not ready; falling back to bare 'distrobox'");
-            crate::fakers::Command::new("distrobox")
-        });
-
-        this.imp()
-            .distrobox
-            .set(Distrobox::new(command_runner.clone(), cmd_factory))
-            .or(Err("distrobox already set"))
-            .unwrap();
-
-        let sorter = gtk::CustomSorter::new(clone!(
-            #[strong]
-            this,
-            move |obj1, obj2| {
-                let container1 = obj1.downcast_ref::<Container>().unwrap();
-                let container2 = obj2.downcast_ref::<Container>().unwrap();
-                let sort_key = *this.imp().containers_sort_key.borrow();
-                match sort_key {
-                    ContainerSortKey::Name => container1.name().cmp(&container2.name()).into(),
-                    ContainerSortKey::CreationDate => {
-                        compare_opt_datetimes(container1.creation_date(), container2.creation_date())
-                            .into()
-                    }
-                    ContainerSortKey::LastUsedDate => {
-                        compare_opt_datetimes(container1.last_used_date(), container2.last_used_date())
-                            .into()
-                    }
-                }
-            }
-        ));
-        this.imp()
-            .containers_sorter
-            .set(sorter)
-            .expect("containers_sorter already set");
-        let sorted = gtk::SortListModel::new(
-            Some(this.containers().inner().clone()),
-            Some(this.imp().containers_sorter.get().unwrap().clone()),
-        );
-
-        this.connect_containers_sort_key_notify(clone!(
-            #[strong]
-            this,
-            move |_obj| {
-                this.imp()
-                    .containers_sorter
-                    .get()
-                    .unwrap()
-                    .changed(gtk::SorterChange::Different);
-            }
-        ));
-
-        this.imp()
-            .sorted_container_model
-            .set(sorted)
-            .expect("sorted_container_model already set");
-
-        // Initialize the SingleSelection model
-        let selection = gtk::SingleSelection::new(Some(this.sorted_container_model()));
-        this.imp()
-            .selected_container_model
-            .set(selection)
-            .expect("selected_container_model already set");
-
         // selected_source drives the distrobox_version derivation.
-        // The fetcher reads the current value from GSettings so refetch()
-        // responds to setting changes without an external supply() call.
         let this_clone_for_source = this.clone();
         let selected_source =
             Query::<DistroboxSource>::new("selected_source".into(), move || {
@@ -313,9 +250,6 @@ impl RootStore {
                 async move { Ok(DistroboxSource::from_setting(&this.settings())) }
             });
 
-        // Host derivation: host_distrobox_version -> Option<DistroboxExecutable>.
-        // When host_distrobox_version has None (not installed), the derived
-        // query produces None.
         let host_version = this.host_distrobox_version().switch_map(|info| {
             match info {
                 Some(exe) => Query::pure(Some(DistroboxExecutable::Host(exe.clone()))),
@@ -323,9 +257,6 @@ impl RootStore {
             }
         });
 
-        // Bundled derivation: bundled_distrobox_version -> Option<DistroboxExecutable>.
-        // When bundled_distrobox_version has None (not installed), the derived
-        // query produces None.
         let bundled_version = this.bundled_distrobox_version().switch_map(|info| {
             match info {
                 Some(exe) => Query::pure(Some(DistroboxExecutable::Bundled(exe.clone()))),
@@ -333,9 +264,6 @@ impl RootStore {
             }
         });
 
-        // distrobox_version derived from selected_source via switch_map.
-        // Whenever the source changes (via supply()), the inner query is
-        // replaced — dropping the old derivation and subscribing to the new one.
         let distrobox_version = selected_source.switch_map({
             let host_version = host_version.clone();
             let bundled_version = bundled_version.clone();
@@ -346,6 +274,7 @@ impl RootStore {
         });
 
         this.imp().distrobox_version.replace(distrobox_version);
+
         let this_clone = this.clone();
         this.distrobox_version().connect_success(move |exe| {
             if exe.is_none() {
@@ -367,9 +296,9 @@ impl RootStore {
                 );
             }
             this_clone.update_bundled_update_available();
-            // The resolved init location may have changed (bundle upgraded,
-            // source switched); re-check which containers point to stale paths.
-            this_clone.check_stale_containers();
+            if let Some(main) = this_clone.main_store() {
+                main.check_stale_containers();
+            }
         });
         let this_clone = this.clone();
         this.distrobox_version().connect_error(move |_error| {
@@ -377,12 +306,11 @@ impl RootStore {
             this_clone.update_bundled_update_available();
         });
 
-        // The stale-container check needs the container runtime for
-        // `inspect`; re-run it once the runtime becomes available in case the
-        // first check (triggered by distrobox_version) ran too early.
         let this_clone = this.clone();
         this.container_runtime().connect_success(move |_runtime| {
-            this_clone.check_stale_containers();
+            if let Some(main) = this_clone.main_store() {
+                main.check_stale_containers();
+            }
         });
 
         let this_clone = this.clone();
@@ -439,15 +367,6 @@ impl RootStore {
         });
 
         let this_clone = this.clone();
-        this.imp().images_query.set_fetcher(move || {
-            let this_clone = this_clone.clone();
-            async move {
-                let distrobox = this_clone.distrobox();
-                distrobox.list_images().map_err(|e| e.into()).await
-            }
-        });
-
-        let this_clone = this.clone();
         this.imp().container_runtime.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
@@ -457,93 +376,7 @@ impl RootStore {
             }
         });
 
-        let this_clone = this.clone();
-        this.imp().downloaded_images_query.set_fetcher(move || {
-            let this_clone = this_clone.clone();
-            async move {
-                this_clone
-                    .container_runtime()
-                    .data()
-                    .ok_or_else(|| anyhow::anyhow!("No container runtime available"))?
-                    .runtime
-                    .downloaded_images()
-                    .await
-            }
-        });
-
-        let this_clone = this.clone();
-        this.imp().containers_query.set_fetcher(move || {
-            let this_clone = this_clone.clone();
-            async move {
-                let distrobox = this_clone.distrobox().clone();
-                let runtime_query = this_clone.container_runtime();
-                let on_containers_changed: Rc<dyn Fn()> = {
-                    let this = this_clone.clone();
-                    Rc::new(move || this.load_containers())
-                };
-                let mut containers = this_clone.distrobox().list().await?;
-
-                // Enrich containers with date info from the container runtime
-                let ids: Vec<&str> = containers.values().map(|c| c.id.as_str()).collect();
-                if let Some(detected) = runtime_query.data() {
-                    match detected.runtime.inspect_containers(&ids).await {
-                        Ok(inspected) => {
-                            for (_name, info) in containers.iter_mut() {
-                                if let Some(inspect_info) = inspected.get(&info.id) {
-                                    info.created_at =
-                                        inspect_info.created_at.clone();
-                                    info.last_used_at =
-                                        inspect_info.last_used_at().map(|s| s.to_string());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "Failed to inspect containers for date info"
-                            );
-                        }
-                    }
-                }
-
-                let containers: Vec<_> = containers
-                    .into_values()
-                    .map(|v| {
-                        Container::from_info(
-                            distrobox.clone(),
-                            on_containers_changed.clone(),
-                            runtime_query.clone(),
-                            v,
-                        )
-                    })
-                    .collect();
-                Ok(containers)
-            }
-        });
-        this.containers_query()
-            .set_refetch_strategy(Query::throttle(Duration::from_secs(1), true));
-
-        let this_clone = this.clone();
-        this.containers_query().connect_success(move |containers| {
-            let this = this_clone.clone();
-
-            reconcile_list_by_key(
-                this.containers(),
-                &containers[..],
-                |item| item.name(),
-                &[
-                    "status-tag",
-                    "status-detail",
-                    "distro",
-                    "image",
-                    "creation-date",
-                    "last-used-date",
-                ],
-            );
-        });
-
-        // Settings change handler must live here (not in constructed()) so it
-        // has access to selected_source for the switch_map supply.
+        // Settings change handler
         {
             let selected_source_clone = selected_source.clone();
             this.settings().connect_changed(
@@ -579,6 +412,20 @@ impl RootStore {
         }
 
         this.enable_shortcuts();
+
+        // Create MainStore and set initial view to Main (optimistic start)
+        let main_store = MainStore::new(
+            command_runner.clone(),
+            this.container_runtime(),
+            this.distrobox_version(),
+        );
+        *this.imp().main_store.borrow_mut() = Some(main_store);
+        this.set_current_view(ViewType::Main);
+        // set_current_view returned early because the default view is already
+        // Main. Notify manually so listeners wired after construction pick up
+        // the initial state.
+        this.notify("main-store");
+        this.notify("welcome-store");
 
         this
     }
@@ -636,7 +483,9 @@ impl RootStore {
         self.container_runtime().refetch();
         self.terminal_repository().load_all();
 
-        self.start_listening_podman_events();
+        if let Some(main) = self.main_store() {
+            main.start_listening_podman_events();
+        }
     }
 
     fn selected_terminal_setting_is_empty(&self) -> bool {
@@ -651,7 +500,6 @@ impl RootStore {
     }
 
     fn selected_terminal_resolution(&self) -> SelectedTerminalResolution {
-        // Old version stored the program, such as "gnome-terminal", now we store the name "GNOME console".
         let name_or_program: String = self.settings().string("selected-terminal").into();
         if name_or_program.is_empty() {
             return SelectedTerminalResolution::Empty;
@@ -689,10 +537,6 @@ impl RootStore {
         });
     }
 
-    pub fn distrobox(&self) -> &crate::backends::Distrobox {
-        self.imp().distrobox.get().unwrap()
-    }
-
     pub fn distrobox_version(&self) -> Query<Option<DistroboxExecutable>> {
         self.imp().distrobox_version.borrow().clone()
     }
@@ -709,18 +553,6 @@ impl RootStore {
         self.imp().container_runtime.clone()
     }
 
-    pub fn images_query(&self) -> Query<Vec<String>> {
-        self.imp().images_query.clone()
-    }
-
-    pub fn downloaded_images_query(&self) -> Query<HashSet<String>> {
-        self.imp().downloaded_images_query.clone()
-    }
-
-    pub fn containers_query(&self) -> Query<Vec<Container>> {
-        self.imp().containers_query.clone()
-    }
-
     pub fn command_runner(&self) -> CommandRunner {
         self.imp().command_runner.get().unwrap().clone()
     }
@@ -729,124 +561,80 @@ impl RootStore {
         self.imp().terminal_repository.borrow().clone()
     }
 
-    pub fn containers(&self) -> &TypedListStore<Container> {
-        &self.imp().containers
-    }
-
     pub fn tasks(&self) -> &TypedListStore<DistroboxTask> {
         &self.imp().tasks
     }
 
-    /// Containers that need their `distrobox-init` path migrated. Items are
-    /// `BoxedAnyObject`s wrapping [`StaleContainer`].
-    pub fn stale_containers(&self) -> &TypedListStore<glib::BoxedAnyObject> {
-        &self.imp().stale_containers
+    // --- Delegation to MainStore ---
+
+    pub fn selected_container_model(&self) -> Option<gtk::SingleSelection> {
+        self.main_store().map(|m| m.selected_container_model())
     }
 
-    /// Inspects every container and records in `stale_containers()` those
-    /// whose baked-in `distrobox-init` bind-mount no longer resolves (see
-    /// docs/distrobox-init-migration.md). Runs automatically whenever the
-    /// resolved distrobox executable changes (startup, source switch, bundle
-    /// download) and when the container runtime becomes available.
-    ///
-    /// Only one check runs at a time; a call made while a check is in
-    /// flight schedules a single re-run once it finishes.
+    pub fn selected_container(&self) -> Option<Container> {
+        self.main_store().and_then(|m| m.selected_container())
+    }
+
+    pub fn selected_container_name(&self) -> Option<String> {
+        self.main_store().and_then(|m| m.selected_container_name())
+    }
+
+    pub fn load_containers(&self) {
+        if let Some(main) = self.main_store() {
+            main.load_containers();
+        }
+    }
+
+    pub fn containers(&self) -> Option<TypedListStore<Container>> {
+        self.main_store().map(|m| m.containers().clone())
+    }
+
     pub fn check_stale_containers(&self) {
-        let imp = self.imp();
-        if imp.stale_check_running.get() {
-            imp.stale_check_pending.set(true);
-            return;
+        if let Some(main) = self.main_store() {
+            main.check_stale_containers();
         }
-        imp.stale_check_running.set(true);
-        let this = self.clone();
-        glib::MainContext::ref_thread_default().spawn_local(async move {
-            loop {
-                this.run_stale_check().await;
-                if !this.imp().stale_check_pending.replace(false) {
-                    break;
-                }
-            }
-            this.imp().stale_check_running.set(false);
-        });
     }
 
-    async fn run_stale_check(&self) {
-        let Some(Some(exe)) = self.distrobox_version().data() else {
-            if !self.stale_containers().is_empty() {
-                self.stale_containers().remove_all();
-            }
-            return;
-        };
-        let Some(current_init) = current_init_path(exe.path()) else {
-            warn!(
-                path = %exe.path(),
-                "Cannot determine distrobox-init location; skipping stale container check"
-            );
-            return;
-        };
-        let Some(detected) = self.container_runtime().data() else {
-            debug!("Container runtime not available yet; skipping stale container check");
-            return;
-        };
-        let containers = match self.distrobox().list().await {
-            Ok(containers) => containers,
-            Err(e) => {
-                warn!(error = %e, "Failed to list containers for stale-init check");
-                return;
-            }
-        };
-        let containers: Vec<(String, bool)> = containers
-            .into_values()
-            .map(|c| (c.name, matches!(c.status, Status::Up(_))))
-            .collect();
+    pub fn stale_containers(&self) -> Option<TypedListStore<glib::BoxedAnyObject>> {
+        self.main_store().map(|m| m.stale_containers().clone())
+    }
 
-        let stale = find_stale_containers(
-            &self.command_runner(),
-            detected.runtime.as_ref(),
-            &containers,
-            &current_init,
-        )
-        .await;
+    pub fn images_query(&self) -> Option<Query<Vec<String>>> {
+        self.main_store().map(|m| m.images_query())
+    }
 
-        if !stale.is_empty() {
-            info!(
-                count = stale.len(),
-                "Found containers with stale distrobox-init paths"
-            );
-        }
-        // Reconcile keyed on the full entry value: unchanged entries keep
-        // their object identity and no items-changed signals fire when the
-        // stale set did not change between checks.
-        let new_items: Vec<glib::BoxedAnyObject> =
-            stale.into_iter().map(glib::BoxedAnyObject::new).collect();
-        reconcile_list_by_key(
-            self.stale_containers(),
-            &new_items[..],
-            |obj| obj.borrow::<StaleContainer>().clone(),
-            &[],
-        );
+    pub fn downloaded_images_query(&self) -> Option<Query<HashSet<String>>> {
+        self.main_store().map(|m| m.downloaded_images_query())
+    }
+
+    pub fn containers_query(&self) -> Option<Query<Vec<Container>>> {
+        self.main_store().map(|m| m.containers_query())
     }
 
     /// Repairs all containers in `stale_containers()` by symlinking their
     /// stale `distrobox-init` paths to the current one. Running containers
     /// are skipped (stop them and re-run). Returns the task so the caller
     /// can display it.
-    pub fn migrate_stale_containers(&self) -> DistroboxTask {
+    pub fn migrate_stale_containers(&self) -> Option<DistroboxTask> {
+        let Some(main) = self.main_store() else {
+            return None;
+        };
+
         // Guard: if a migration task is already in progress, return it
-        // instead of creating a duplicate.
         for task in self.tasks().iter() {
             if task.name() == "migrate-init" && !task.ended() {
-                return task;
+                return Some(task);
             }
         }
 
-        let stale: Vec<StaleContainer> = self
+        let stale: Vec<StaleContainer> = main
             .stale_containers()
             .iter()
             .map(|obj| obj.borrow::<StaleContainer>().clone())
             .collect();
+
         let this = self.clone();
-        self.create_task("system", "migrate-init", move |task| async move {
+        Some(self.create_task("system", "migrate-init", move |task| async move {
             task.set_description(
                 "Repairing containers that point to an outdated distrobox-init location",
             );
@@ -860,10 +648,12 @@ impl RootStore {
                 );
             };
 
-            // Re-check which containers are running right now: migrating a
-            // container while it is starting is racy (see docs).
-            let running: HashSet<String> = this
+            let distrobox = this
+                .main_store()
+                .expect("migrate_stale_containers requires Main view")
                 .distrobox()
+                .clone();
+            let running: HashSet<String> = distrobox
                 .list()
                 .await?
                 .into_values()
@@ -900,66 +690,36 @@ impl RootStore {
                 }
             }
 
-            this.check_stale_containers();
+            if let Some(main) = this.main_store() {
+                main.check_stale_containers();
+            }
             if failed > 0 {
                 anyhow::bail!("Failed to migrate {} container(s)", failed);
             }
             if skipped > 0 {
-                // Not a failure: the fix is simply deferred until the
-                // containers are stopped (see docs/distrobox-init-migration.md).
                 task.append_output(&format!(
                     "Skipped {} running container(s). Stop them and migrate again.\r\n",
                     skipped
                 ));
             }
             Ok(())
-        })
-    }
-
-    pub fn selected_container_model(&self) -> gtk::SingleSelection {
-        self.imp().selected_container_model.get().unwrap().clone()
-    }
-
-    pub fn sorted_container_model(&self) -> gtk::SortListModel {
-        self.imp().sorted_container_model.get().unwrap().clone()
-    }
-
-    /// Get the currently selected container, if any
-    pub fn selected_container(&self) -> Option<Container> {
-        let model = self.selected_container_model();
-        let position = model.selected();
-        if position == gtk::INVALID_LIST_POSITION {
-            None
-        } else {
-            model
-                .selected_item()
-                .and_then(|obj| obj.downcast::<Container>().ok())
-        }
-    }
-
-    pub fn load_containers(&self) {
-        self.containers_query().refetch();
+        }))
     }
 
     pub fn distrobox_source(&self) -> DistroboxSource {
         DistroboxSource::from_setting(&self.settings())
     }
 
-    /// Whether the current `distrobox-executable` setting selects the bundled distrobox.
     pub fn is_distrobox_bundled(&self) -> bool {
         self.distrobox_source() == DistroboxSource::Bundled
     }
 
-    /// Switch the `distrobox-executable` setting between bundled and host.
     pub fn set_distrobox_source(&self, source: DistroboxSource) {
         self.settings()
             .set_string("distrobox-executable", source.to_setting_str())
             .expect("distrobox-executable key must exist in schema");
     }
 
-    /// Recalculates and sets the `bundled_update_available` property.
-    /// Should be called after distrobox_version query completes, after a download, or when
-    /// the distrobox-executable setting changes.
     pub fn update_bundled_update_available(&self) {
         if self.distrobox_source() == DistroboxSource::Bundled {
             if let Some(Some(installed)) = self.bundled_distrobox_version().data() {
@@ -973,7 +733,6 @@ impl RootStore {
     }
 
     pub fn download_distrobox(&self) -> DistroboxTask {
-        // Guard: if a download task is already in progress, return it instead of creating a duplicate
         for task in self.tasks().iter() {
             if task.name() == "Downloading Distrobox" && !task.ended() {
                 return task;
@@ -985,63 +744,6 @@ impl RootStore {
         });
         self.set_selected_task(Some(task.clone()));
         task
-    }
-
-    /// Start listening to podman events and auto-refresh container list for distrobox events
-    pub fn start_listening_podman_events(&self) {
-        let this = self.clone();
-        let command_runner = self.command_runner();
-
-        glib::MainContext::ref_thread_default().spawn_local(async move {
-            info!("Starting podman events listener");
-            let podman = crate::backends::podman::Podman::new(Rc::new(command_runner.clone()));
-
-            let stream = match podman.listen_events() {
-                Ok(stream) => stream,
-                Err(e) => {
-                    warn!("Failed to start podman events listener: {}", e);
-                    return;
-                }
-            };
-
-            // Process events
-            stream
-                .for_each(|line_result| {
-                    let this = this.clone();
-                    async move {
-                        match line_result {
-                            Ok(line) => {
-                                // Parse the JSON event
-                                match serde_json::from_str::<PodmanEvent>(&line) {
-                                    Ok(event) => {
-                                        // Only refresh if this is a distrobox container event
-                                        if event.is_container_event() && event.is_distrobox() {
-                                            debug!(
-                                                "Distrobox container event detected ({}), refreshing container list",
-                                                event.status.as_deref().unwrap_or("unknown")
-                                            );
-                                            this.containers_query().refetch_if_stale(Duration::from_secs(1));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("Failed to parse podman event JSON: {} - Line: {}", e, line);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("Error reading podman event: {}", e);
-                            }
-                        }
-                    }
-                })
-                .await;
-
-            warn!("Podman events listener stopped");
-        });
-    }
-
-    pub fn selected_container_name(&self) -> Option<String> {
-        self.selected_container().map(|c| c.name())
     }
 
     pub fn create_task<F, Fut>(&self, name: &str, action: &str, operation: F) -> DistroboxTask
@@ -1060,7 +762,9 @@ impl RootStore {
             if let Err(ref e) = result {
                 error!(error = %e, "Task execution failed");
             }
-            this.load_containers();
+            if let Some(main) = this.main_store() {
+                main.load_containers();
+            }
             result
         });
 
@@ -1073,35 +777,47 @@ impl RootStore {
     }
 
     pub fn create_container(&self, create_args: CreateArgs) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("create_container requires Main view")
+            .distrobox()
+            .clone();
         let name = create_args.name.to_string();
         let task = self.create_task(&name, "create", move |task| async move {
             task.set_description(
                 "Creation requires downloading the container image, which may take some time...",
             );
-            let child = this.distrobox().create(create_args).await?;
+            let child = distrobox.create(create_args).await?;
             task.handle_child_output(child).await
         });
         self.view_task(&task);
     }
     pub fn clone_container(&self, source_name: &str, create_args: CreateArgs) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("clone_container requires Main view")
+            .distrobox()
+            .clone();
         let name = create_args.name.to_string();
         let source = source_name.to_string();
         let task = self.create_task(&name, "clone", move |task| {
-            let this = this.clone();
+            let distrobox = distrobox.clone();
             let create_args = create_args;
             let source = source.clone();
             async move {
                 task.set_description("Cloning container (may take some time)...");
-                let child = this.distrobox().clone_from(&source, create_args).await?;
+                let child = distrobox.clone_from(&source, create_args).await?;
                 task.handle_child_output(child).await
             }
         });
         self.view_task(&task);
     }
     pub fn assemble_container(&self, file_path: &str) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("assemble_container requires Main view")
+            .distrobox()
+            .clone();
         let file_path_clone = file_path.to_string();
         let file_name = Path::new(file_path)
             .file_name()
@@ -1109,27 +825,35 @@ impl RootStore {
             .unwrap_or(file_path);
 
         let task = self.create_task(file_name, "assemble", move |task| async move {
-            let child = this.distrobox().assemble(&file_path_clone)?;
+            let child = distrobox.assemble(&file_path_clone)?;
             task.handle_child_output(child).await
         });
         self.view_task(&task);
     }
 
     pub fn upgrade_container(&self, container: &Container) -> DistroboxTask {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("upgrade_container requires Main view")
+            .distrobox()
+            .clone();
         let name_for_task = container.name();
         let name = name_for_task.clone();
         self.create_task(&name_for_task, "upgrade", move |task| async move {
-            let child = this.distrobox().upgrade(&name)?;
+            let child = distrobox.upgrade(&name)?;
             task.handle_child_output(child).await
         })
     }
 
     pub fn launch_app(&self, container: &Container, app: ExportableApp) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("launch_app requires Main view")
+            .distrobox()
+            .clone();
         let container = container.clone();
         self.create_task(&container.name(), "launch-app", move |task| async move {
-            let child = this.distrobox().launch_app(&container.name(), &app)?;
+            let child = distrobox.launch_app(&container.name(), &app)?;
             task.handle_child_output(child).await
         });
     }
@@ -1143,6 +867,11 @@ impl RootStore {
             return;
         };
 
+        let distrobox = self
+            .main_store()
+            .expect("install_package requires Main view")
+            .distrobox()
+            .clone();
         let this = self.clone();
         let package_manager = distro.package_manager();
         let path_clone = path.to_owned();
@@ -1150,13 +879,13 @@ impl RootStore {
         let name = name_for_task.clone();
         self.create_task(&name_for_task, "install", move |task| async move {
             task.set_description(format!("Installing {:?}", path_clone));
-            // The file provided from the portal is under /run/user/1000 which is not accessible by root.
-            // We can copy the file as a normal user to /tmp and then install.
+            // The file provided from the portal is under /run/user/1000 which
+            // is not accessible by root. Copy the file as a normal user to
+            // /tmp first, then install.
+            let enter_cmd = distrobox.enter_cmd(&name);
 
-            let enter_cmd = this.distrobox().enter_cmd(&name);
-
-            // the file of the package must have the correct extension (.deb for apt-get).
-            // Use original filename or generate one with proper extension
+            // The file must have the correct extension (e.g. .deb for apt-get).
+            // Use the original filename or generate one with the proper extension.
             let filename = path_clone
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -1189,11 +918,15 @@ impl RootStore {
     }
 
     pub fn export_app(&self, container: &Container, desktop_file_path: &str) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("export_app requires Main view")
+            .distrobox()
+            .clone();
         let container = container.clone();
         let desktop_file_path = desktop_file_path.to_string();
         self.create_task(&container.name(), "export", move |_task| async move {
-            this.distrobox()
+            distrobox
                 .export_app(&container.name(), &desktop_file_path)
                 .await?;
             container.apps().refetch();
@@ -1202,11 +935,15 @@ impl RootStore {
     }
 
     pub fn unexport_app(&self, container: &Container, desktop_file_path: &str) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("unexport_app requires Main view")
+            .distrobox()
+            .clone();
         let container = container.clone();
         let desktop_file_path = desktop_file_path.to_string();
         self.create_task(&container.name(), "unexport", move |_task| async move {
-            this.distrobox()
+            distrobox
                 .unexport_app(&container.name(), &desktop_file_path)
                 .await?;
             container.apps().refetch();
@@ -1215,14 +952,18 @@ impl RootStore {
     }
 
     pub fn export_binary(&self, container: &Container, binary_path: &str) -> DistroboxTask {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("export_binary requires Main view")
+            .distrobox()
+            .clone();
         let container = container.clone();
         let binary_path = binary_path.to_string();
         self.create_task(
             &container.name(),
             "export-binary",
             move |_task| async move {
-                this.distrobox()
+                distrobox
                     .export_binary(&container.name(), &binary_path)
                     .await?;
                 container.binaries().refetch();
@@ -1232,14 +973,18 @@ impl RootStore {
     }
 
     pub fn unexport_binary(&self, container: &Container, binary_path: &str) {
-        let this = self.clone();
+        let distrobox = self
+            .main_store()
+            .expect("unexport_binary requires Main view")
+            .distrobox()
+            .clone();
         let container = container.clone();
         let binary_path = binary_path.to_string();
         self.create_task(
             &container.name(),
             "unexport-binary",
             move |_task| async move {
-                this.distrobox()
+                distrobox
                     .unexport_binary(&container.name(), &binary_path)
                     .await?;
                 container.binaries().refetch();
@@ -1249,38 +994,54 @@ impl RootStore {
     }
 
     pub fn delete_container(&self, container: &Container) {
+        let distrobox = self
+            .main_store()
+            .expect("delete_container requires Main view")
+            .distrobox()
+            .clone();
         let name_for_task = container.name();
         let name = name_for_task.clone();
-        let this = self.clone();
         self.create_task(&name_for_task, "delete", move |_task| async move {
-            this.distrobox().remove(&name).await?;
+            distrobox.remove(&name).await?;
             Ok(())
         });
     }
 
     pub fn stop_container(&self, container: &Container) {
+        let distrobox = self
+            .main_store()
+            .expect("stop_container requires Main view")
+            .distrobox()
+            .clone();
         let name_for_task = container.name();
         let name = name_for_task.clone();
-        let this = self.clone();
         self.create_task(&name_for_task, "stop", move |_task| async move {
-            this.distrobox().stop(&name).await?;
+            distrobox.stop(&name).await?;
             Ok(())
         });
     }
 
     pub fn spawn_container_terminal(&self, container: &Container) -> DistroboxTask {
+        let distrobox = self
+            .main_store()
+            .expect("spawn_container_terminal requires Main view")
+            .distrobox()
+            .clone();
+        let this = self.clone();
         let name_for_task = container.name();
         let name = name_for_task.clone();
-        let this = self.clone();
         self.create_task(&name_for_task, "spawn-terminal", move |_task| async move {
-            let enter_cmd = this.distrobox().enter_cmd(&name);
+            let enter_cmd = distrobox.enter_cmd(&name);
             this.spawn_terminal_cmd(name, &enter_cmd).await
         })
     }
 
     pub fn upgrade_all(&self) {
-        for container in self.containers().iter() {
-            self.upgrade_container(&container);
+        if let Some(main) = self.main_store() {
+            let containers = main.all_containers();
+            for container in containers {
+                self.upgrade_container(&container);
+            }
         }
     }
 
@@ -1293,19 +1054,15 @@ impl RootStore {
         this.set_current_dialog(DialogType::ExportableApps);
     }
 
-    /// Opens a dialog with the given parameters.
-    /// The parameters are stored and can be retrieved via `dialog_params()`.
     pub fn open_dialog(&self, dialog_type: DialogType, params: DialogParams) {
         self.imp().dialog_params.replace(params);
         self.set_current_dialog(dialog_type);
     }
 
-    /// Returns the current dialog parameters.
     pub fn dialog_params(&self) -> std::cell::Ref<'_, DialogParams> {
         self.imp().dialog_params.borrow()
     }
 
-    /// Takes the current dialog parameters, replacing them with default.
     pub fn take_dialog_params(&self) -> DialogParams {
         self.imp().dialog_params.take()
     }
@@ -1383,7 +1140,6 @@ impl RootStore {
         };
         info!(terminal = %terminal.program, "Validating terminal");
 
-        // Try running a simple command to validate the terminal
         let mut cmd = Command::new(terminal.program.clone());
         cmd.args(terminal.extra_args.clone())
             .arg(terminal.separator_arg)
@@ -1415,11 +1171,15 @@ impl RootStore {
     fn reload_till_up(&self, name: String, times: usize) {
         let this = self.clone();
         glib::MainContext::ref_thread_default().spawn_local(async move {
+            let distrobox = this
+                .main_store()
+                .expect("reload_till_up requires Main view")
+                .distrobox()
+                .clone();
             for i in 1..times {
                 glib::timeout_future(Duration::from_millis(i as u64 * 300)).await;
 
-                // refresh the status of the container
-                let containers = match this.distrobox().list().await {
+                let containers = match distrobox.list().await {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(error = %e, "Failed to list containers while waiting for container to start");
@@ -1431,7 +1191,6 @@ impl RootStore {
                     continue;
                 };
 
-                // if the container is running, we finally update the UI
                 if let Status::Up(_) = &container.status {
                     this.load_containers();
                     return;
@@ -1451,7 +1210,6 @@ impl RootStore {
     }
 
     pub async fn is_nvidia_host(&self) -> bool {
-        // uses lspci to check if the host has an NVIDIA GPU
         debug!("Checking if host is NVIDIA");
         let cmd = Command::new("lspci");
         let output = glib::future_with_timeout(Duration::from_secs(2), async move {
@@ -1468,7 +1226,7 @@ impl RootStore {
             }
             Err(e) => {
                 warn!(?e, "Failed to check if host is NVIDIA");
-                false // If we can't run lspci, we assume it's not NVIDIA
+                false
             }
         }
     }
@@ -1486,14 +1244,11 @@ impl RootStore {
     }
 
     pub async fn resolve_host_path(&self, path: &str) -> Result<String, backends::Error> {
-        // The path could be a:
-        // 1. Host path, already resolved to a real location, e.g., "/home/user/Documents/custom-home-folder".
-        // 2. Path from a flatpak sandbox, e.g., "/run/user/1000/doc/abc123".
-        // The user may not have the `getfattr`, but we still want to try using it,
-        // because we don't have an exact way to know if the path is from a flatpak sandbox or not.
-        // If the path is already a real host path, `getfattr` may return an empty output,
-        // because it doesn't have the `user.document-portal.host-path` attribute set by the flatpak portal.
-
+        // The path could be a host path already resolved to a real location
+        // (e.g. /home/user/Documents) or a flatpak sandbox path
+        // (e.g. /run/user/1000/doc/abc123). Use getfattr to resolve sandbox
+        // paths via the document portal's xattr. If getfattr returns empty
+        // output, the path is already a real host path.
         debug!(?path, "Resolving host path");
 
         let cmd = Self::getfattr_cmd(path);
@@ -1508,7 +1263,6 @@ impl RootStore {
             Ok(resolved_path) => {
                 debug!(?resolved_path, "Resolved host path");
                 if resolved_path.is_empty() {
-                    // If the output is empty, we assume the path is already a real host path.
                     return Ok(path.to_string());
                 }
                 Ok(resolved_path.trim().to_string())
@@ -1531,18 +1285,6 @@ impl RootStore {
 impl Default for RootStore {
     fn default() -> Self {
         glib::Object::builder().build()
-    }
-}
-
-fn compare_opt_datetimes(
-    a: Option<glib::DateTime>,
-    b: Option<glib::DateTime>,
-) -> std::cmp::Ordering {
-    match (a.map(|d| d.to_unix()), b.map(|d| d.to_unix())) {
-        (Some(a), Some(b)) => b.cmp(&a), // descending: newest/most-recent first
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
@@ -1576,18 +1318,15 @@ mod tests {
 
     #[gtk::test]
     fn test_resolve_path() {
-        // (input_path, getfattr_output, expected_resolved_path)
         let tests = [
             (
                 "/run/user/1000/doc/abc123",
                 Ok("/home/user/Documents/custom-home-folder"),
                 Ok("/home/user/Documents/custom-home-folder"),
             ),
-            // When getfattr returns empty for a non-sandbox path, we return the original path
             ("/home/user/Documents/custom-home-folder", Ok(""), {
                 Ok("/home/user/Documents/custom-home-folder")
             }),
-            // If the resolution fails and the path is from a sandbox, we expect an error
             ("/run/user/1000/doc/xyz456", Err(()), Err(())),
         ];
 
@@ -1596,7 +1335,6 @@ mod tests {
                 .cmd_full(RootStore::getfattr_cmd(input_path), move || {
                     getfattr_output
                         .map(|s| s.to_string())
-                        // we need to return a real io::Error here
                         .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "Command not found"))
                 })
                 .build();
@@ -2047,8 +1785,6 @@ mod tests {
     fn test_welcome_view_shown_when_bundled_not_installed() {
         use std::os::unix::process::ExitStatusExt;
 
-        // Make `test -e <bundled_path>` fail so resolve_bundled_distrobox_path
-        // returns None, simulating a bundled distrobox that hasn't been downloaded.
         let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
         let mut test_cmd = Command::new("test");
         test_cmd.arg("-e").arg(&bundled_path);
@@ -2090,8 +1826,6 @@ mod tests {
 
     #[gtk::test]
     fn test_no_welcome_redirect_when_bundled_is_installed() {
-        // Default NullCommandRunner: `test -e <path>` exits 0 (path exists).
-        // Register a version response for the bundled distrobox binary.
         let bundled_path = crate::distrobox_downloader::get_bundled_distrobox_path();
         let mut version_cmd = Command::new(&bundled_path);
         version_cmd.arg("version");
@@ -2134,9 +1868,6 @@ mod tests {
     fn test_null_no_version_both_queries_are_none() {
         use std::os::unix::process::ExitStatusExt;
 
-        // Mirror DistroboxStoreTy::NullNoVersion: distrobox version fails,
-        // fallback exit status is non-zero so all other commands (test -e,
-        // command -v, etc.) also fail.
         let runner = NullCommandRunnerBuilder::new()
             .cmd_full_with_status(
                 {
@@ -2154,7 +1885,6 @@ mod tests {
 
         store.start_background_tasks();
 
-        // Wait for both queries to settle
         spin_main_context_until(Duration::from_secs(5), || {
             store.host_distrobox_version().is_success()
                 && store.bundled_distrobox_version().is_success()
