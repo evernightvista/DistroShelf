@@ -68,9 +68,13 @@ mod imp {
 
             obj.set_child(Some(&self.button));
 
-            let this_clone = obj.clone();
+            let this_weak = obj.downgrade();
             obj.root_store().tasks().inner().connect_items_changed(
                 move |tasks, position, _removed, added| {
+                    let Some(this_clone) = this_weak.upgrade() else {
+                        return;
+                    };
+
                     // Show warning if a task already failed
                     // This loop will reset the previous warning flag if there is no failed task
                     let mut has_warning = false;
@@ -88,10 +92,12 @@ mod imp {
                     for i in position..position + added {
                         let item = tasks.item(i);
                         let item: &DistroboxTask = item.and_downcast_ref().unwrap();
-                        let this_clone = this_clone.clone();
+                        let weak = this_clone.downgrade();
                         item.connect_status_notify(move |item| {
-                            if item.is_failed() {
-                                this_clone.set_has_warning(true);
+                            if let Some(clone) = weak.upgrade() {
+                                if item.is_failed() {
+                                    clone.set_has_warning(true);
+                                }
                             }
                         });
                     }

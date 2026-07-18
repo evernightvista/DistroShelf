@@ -214,7 +214,7 @@ impl IntegratedTerminal {
         }
 
         imp.reload_button.set_visible(false);
-        glib::MainContext::default().spawn_local(clone!(
+        glib::MainContext::ref_thread_default().spawn_local(clone!(
             #[weak(rename_to=this)]
             self,
             async move {

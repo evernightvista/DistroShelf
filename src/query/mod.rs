@@ -107,6 +107,10 @@ pub struct QueryInner<T> {
     /// the inner state so they disconnect automatically when the last query
     /// clone is dropped.
     trigger_guards: Vec<RefetchTriggerGuard>,
+
+    /// Monotonic counter incremented on each `fetch()`. Used to detect and
+    /// discard stale results from aborted in-flight fetches.
+    fetch_generation: u64,
 }
 
 impl<T> QueryInner<T> {
@@ -127,6 +131,7 @@ impl<T> QueryInner<T> {
             retry_count: 0,
             refetch_strategy: None,
             trigger_guards: Vec::new(),
+            fetch_generation: 0,
         }
     }
 
@@ -510,8 +515,12 @@ where
         query
     }
 
-    /// Execute a fetch operation and handle the result
-    async fn execute_fetch(inner: &Rc<RefCell<QueryInner<T>>>) {
+    /// Execute a fetch operation and handle the result.
+    ///
+    /// `generation` is the sequence number from when `fetch()` was called.
+    /// If a newer fetch has been started (higher generation), this fetch
+    /// silently discards its result to avoid stale-data overwrites.
+    async fn execute_fetch(inner: &Rc<RefCell<QueryInner<T>>>, generation: u64) {
         let key = { inner.borrow().key.clone() };
         let query_obj = { inner.borrow().query_obj.clone() };
         let timeout = { inner.borrow().timeout };
@@ -541,6 +550,11 @@ where
         } else {
             future.await
         };
+
+        if inner.borrow().fetch_generation != generation {
+            debug!(resource_key = %key, generation, current = inner.borrow().fetch_generation, "Discarding stale fetch result");
+            return;
+        }
 
         match result {
             Ok(_data) => {
@@ -604,11 +618,14 @@ where
         // right axis for throttling *attempts* independently of staleness.
         self.inner.borrow_mut().last_fetch_started_at = Some(SystemTime::now());
 
+        self.inner.borrow_mut().fetch_generation += 1;
+        let generation = self.inner.borrow().fetch_generation;
+
         let inner = self.inner.clone();
 
         // Spawn the async task on GLib main loop and store the handle
         let handle = glib::spawn_future_local(async move {
-            Self::execute_fetch(&inner).await;
+            Self::execute_fetch(&inner, generation).await;
         });
 
         self.inner.borrow_mut().fetch_task_handle = Some(handle);
@@ -696,15 +713,22 @@ where
             info!(resource_key = %key, retry_count = retry_count, delay_secs = delay.as_secs(), "Scheduling retry for resource fetch");
             let inner = self.inner.clone();
             // Spawn the async task on GLib main loop and store the handle
+            let generation = inner.borrow().fetch_generation;
             let handle = glib::spawn_future_local(async move {
                 glib::timeout_future(delay).await;
+                if inner.borrow().fetch_generation != generation {
+                    return;
+                }
                 // Record the start of this retry attempt, consistent with
                 // `fetch()`. Done after the delay so it reflects when the
                 // attempt actually begins, not when it was scheduled.
                 inner.borrow_mut().last_fetch_started_at = Some(SystemTime::now());
-                Self::execute_fetch(&inner).await;
+                Self::execute_fetch(&inner, generation).await;
             });
 
+            if let Some(old_handle) = self.inner.borrow_mut().fetch_task_handle.take() {
+                old_handle.abort();
+            }
             self.inner.borrow_mut().fetch_task_handle = Some(handle);
             Some(retry_count)
         } else {
@@ -728,7 +752,8 @@ where
         let inner = self.inner.clone();
         let query_obj = { inner.borrow().query_obj.clone() };
         query_obj.connect_local("success", false, move |_args| {
-            if let Some(data) = &inner.borrow().data {
+            let data = inner.borrow().data.clone();
+            if let Some(ref data) = data {
                 f(data);
             }
             None
@@ -739,7 +764,8 @@ where
         let inner = self.inner.clone();
         let query_obj = { inner.borrow().query_obj.clone() };
         query_obj.connect_local("error", false, move |_args| {
-            if let Some(error) = &inner.borrow().error {
+            let error = inner.borrow().error.clone();
+            if let Some(ref error) = error {
                 f(error);
             }
             None

@@ -29,6 +29,17 @@ pub fn reconcile_properties<T: IsA<glib::Object>>(dest: &T, src: &T, properties:
         }
     }
 }
+/// Merge `other` into `list`, keyed by `key_fn`.
+///
+/// Existing items whose key matches are updated in-place via property
+/// reconciliation; items present only in `other` are appended. Callers must
+/// supply the list of `properties` that should be synchronised.
+///
+/// **Thread safety:** must only be called from the GTK main thread.
+///
+/// **Re-entrancy:** not re-entrant. Do not invoke this from inside a signal
+/// handler that could itself be triggered by the list mutations performed
+/// here (e.g. `items-changed` on the same [`TypedListStore`]).
 pub fn reconcile_list_by_key<T: IsA<glib::Object>, K: Hash + std::cmp::Eq>(
     list: &TypedListStore<T>,
     other: &[T],

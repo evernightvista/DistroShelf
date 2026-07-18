@@ -394,8 +394,10 @@ impl DistroShelfWindow {
                             action.change_state(&sort_key.to_str().to_variant());
                         }
                     });
-                    // Store handler so it lives as long as the window
-                    // (old handler auto-disconnects when old MainStore drops)
+                    // Store handler so it lives as long as the window.
+                    // The old handler is auto-disconnected when the old
+                    // MainStore is dropped; we explicitly drop the stored
+                    // handler ID so it isn't leaked.
                     this_clone
                         .imp()
                         .sort_key_handler_id
@@ -563,22 +565,25 @@ impl DistroShelfWindow {
         let root_store = self.root_store();
         if let Some(container) = root_store.selected_container() {
             let task = root_store.spawn_container_terminal(&container);
-            let this = self.clone();
-            task.connect_status_notify(move |task| {
-                if task.error().is_some() {
-                    let toast = adw::Toast::new(&gettext("Check your terminal settings."));
-                    toast.set_button_label(Some(&gettext("Preferences")));
-                    toast.connect_button_clicked(clone!(
-                        #[weak]
-                        this,
-                        move |_| {
-                            this.root_store()
-                                .set_current_dialog(DialogType::Preferences);
-                        }
-                    ));
-                    this.add_toast(toast);
+            task.connect_status_notify(clone!(
+                #[weak(rename_to = this)]
+                self,
+                move |task| {
+                    if task.error().is_some() {
+                        let toast = adw::Toast::new(&gettext("Check your terminal settings."));
+                        toast.set_button_label(Some(&gettext("Preferences")));
+                        toast.connect_button_clicked(clone!(
+                            #[weak]
+                            this,
+                            move |_| {
+                                this.root_store()
+                                    .set_current_dialog(DialogType::Preferences);
+                            }
+                        ));
+                        this.add_toast(toast);
+                    }
                 }
-            });
+            ));
         }
     }
 

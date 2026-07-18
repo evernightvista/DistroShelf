@@ -79,7 +79,7 @@ mod imp {
                 "terminals-changed",
                 false,
                 glib::closure_local!(
-                    #[strong]
+                    #[weak]
                     obj,
                     move |_: TerminalRepository| {
                         obj.rebuild_terminals_list();

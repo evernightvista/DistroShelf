@@ -92,6 +92,9 @@ mod imp {
 
         /// Parameters for the current dialog (not a GObject property)
         pub dialog_params: RefCell<DialogParams>,
+
+        /// Guards against concurrent `ensure_selected_terminal_after_load` spawns.
+        pub terminal_selection_in_flight: std::cell::Cell<bool>,
     }
 
     impl Default for RootStore {
@@ -124,6 +127,7 @@ mod imp {
                 shortcuts: gio::ListStore::new::<gtk::Shortcut>(),
                 shortcuts_enabled: std::cell::Cell::new(false),
                 main_store: RefCell::new(None),
+                terminal_selection_in_flight: std::cell::Cell::new(false),
             }
         }
     }
@@ -521,14 +525,20 @@ impl RootStore {
             return;
         }
 
+        if self.imp().terminal_selection_in_flight.replace(true) {
+            return;
+        }
+
         let this = self.clone();
         glib::MainContext::ref_thread_default().spawn_local(async move {
             let Some(default_terminal) = this.terminal_repository().default_terminal().await else {
+                this.imp().terminal_selection_in_flight.set(false);
                 return;
             };
             if this.selected_terminal().is_none() && this.selected_terminal_setting_is_empty() {
                 this.set_selected_terminal_name(&default_terminal.name);
             }
+            this.imp().terminal_selection_in_flight.set(false);
         });
     }
 
