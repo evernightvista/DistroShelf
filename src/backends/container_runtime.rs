@@ -40,7 +40,24 @@ pub struct ContainerInspectInfo {
 
 impl ContainerInspectInfo {
     pub fn last_used_at(&self) -> Option<&str> {
-        self.finished_at.as_deref().or(self.started_at.as_deref())
+        // Return the most recent of started_at/finished_at. Naively preferring
+        // `finished_at` is wrong for Podman, which does NOT zero out
+        // `FinishedAt` for running containers (unlike Docker's
+        // `0001-01-01T00:00:00Z` sentinel): a running container would report
+        // its stale previous-stop time as "last used", making every running
+        // container compare equal and breaking sort-by-last-used. Timestamps
+        // from a given runtime share a consistent RFC3339 format and timezone
+        // offset, so lexicographic comparison is chronological.
+        match (&self.started_at, &self.finished_at) {
+            (Some(s), Some(f)) => Some(if s.as_str() >= f.as_str() {
+                s.as_str()
+            } else {
+                f.as_str()
+            }),
+            (Some(s), None) => Some(s.as_str()),
+            (None, Some(f)) => Some(f.as_str()),
+            (None, None) => None,
+        }
     }
 }
 
@@ -116,6 +133,37 @@ mod tests {
     // but exits non-zero.
     fn failing_status() -> ExitStatus {
         ExitStatusExt::from_raw(1)
+    }
+
+    #[test]
+    fn test_last_used_at_prefers_more_recent_of_started_and_finished() {
+        // Podman does NOT zero out FinishedAt for running containers, so a
+        // running container exposes a stale previous-stop time alongside its
+        // fresh StartedAt. last_used_at() must return the newer StartedAt,
+        // otherwise every running container compares equal and
+        // sort-by-last-used silently no-ops.
+        let running_podman = ContainerInspectInfo {
+            started_at: Some("2026-07-18T17:41:43.123456789+02:00".into()),
+            finished_at: Some("2026-07-14T18:51:23.796883590+02:00".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            running_podman.last_used_at(),
+            Some("2026-07-18T17:41:43.123456789+02:00"),
+            "running container should report its start time, not the stale stop time"
+        );
+
+        // Stopped container: FinishedAt is the more recent event.
+        let stopped = ContainerInspectInfo {
+            started_at: Some("2026-07-10T08:00:00Z".into()),
+            finished_at: Some("2026-07-12T09:00:00Z".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            stopped.last_used_at(),
+            Some("2026-07-12T09:00:00Z"),
+            "stopped container should report its finish time"
+        );
     }
 
     #[test]

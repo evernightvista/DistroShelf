@@ -549,14 +549,19 @@ mod tests {
         })
     }
 
-    fn container_info(id: &str, name: &str, created_at: Option<&str>) -> ContainerInfo {
+    fn container_info(
+        id: &str,
+        name: &str,
+        created_at: Option<&str>,
+        last_used_at: Option<&str>,
+    ) -> ContainerInfo {
         ContainerInfo {
             id: id.into(),
             name: name.into(),
             status: Status::Created("2 minutes ago".into()),
             image: "docker.io/library/ubuntu:latest".into(),
             created_at: created_at.map(|s| s.to_string()),
-            last_used_at: None,
+            last_used_at: last_used_at.map(|s| s.to_string()),
         }
     }
 
@@ -576,8 +581,8 @@ mod tests {
     #[gtk::test]
     fn test_containers_query_populates_containers() {
         let runner = Distrobox::null_command_runner(&[DistroboxCommandRunnerResponse::List(vec![
-            container_info("1", "Ubuntu", None),
-            container_info("2", "Fedora", None),
+            container_info("1", "Ubuntu", None, None),
+            container_info("2", "Fedora", None, None),
         ])]);
         let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
 
@@ -665,24 +670,33 @@ mod tests {
         );
 
         let noop: Rc<dyn Fn()> = Rc::new(|| {});
-        let make = |id: &str, name: &str, created_at: Option<&str>| {
+        let make = |id: &str, name: &str, created_at: Option<&str>, last_used_at: Option<&str>| {
             Container::from_info(
                 store.distrobox().clone(),
                 noop.clone(),
                 store.runtime_query(),
-                container_info(id, name, created_at),
+                container_info(id, name, created_at, last_used_at),
             )
         };
-        store
-            .containers()
-            .append(&make("1", "beta", Some("2024-01-01T00:00:00Z")));
-        store
-            .containers()
-            .append(&make("2", "alpha", Some("2023-01-01T00:00:00Z")));
-        store
-            .containers()
-            .append(&make("3", "gamma", Some("2025-01-01T00:00:00Z")));
-        store.containers().append(&make("4", "delta", None));
+        store.containers().append(&make(
+            "1",
+            "beta",
+            Some("2024-01-01T00:00:00Z"),
+            Some("2023-06-01T00:00:00Z"),
+        ));
+        store.containers().append(&make(
+            "2",
+            "alpha",
+            Some("2023-01-01T00:00:00Z"),
+            Some("2025-02-01T00:00:00Z"),
+        ));
+        store.containers().append(&make(
+            "3",
+            "gamma",
+            Some("2025-01-01T00:00:00Z"),
+            Some("2024-06-01T00:00:00Z"),
+        ));
+        store.containers().append(&make("4", "delta", None, None));
 
         let sorted = store.sorted_container_model();
         assert_eq!(
@@ -698,6 +712,13 @@ mod tests {
             "creation-date sort should order newest first with missing dates last"
         );
 
+        store.set_containers_sort_key(ContainerSortKey::LastUsedDate);
+        assert_eq!(
+            sorted_names(&sorted),
+            ["alpha", "gamma", "beta", "delta"],
+            "last-used-date sort should order newest first with missing dates last"
+        );
+
         store.set_containers_sort_key(ContainerSortKey::Name);
         assert_eq!(sorted_names(&sorted), ["alpha", "beta", "delta", "gamma"]);
     }
@@ -705,8 +726,8 @@ mod tests {
     #[gtk::test]
     fn test_selected_container_none_when_empty_then_first_after_load() {
         let runner = Distrobox::null_command_runner(&[DistroboxCommandRunnerResponse::List(vec![
-            container_info("1", "Ubuntu", None),
-            container_info("2", "Fedora", None),
+            container_info("1", "Ubuntu", None, None),
+            container_info("2", "Fedora", None, None),
         ])]);
         let store = MainStore::new(runner, no_runtime_query(), version_query("distrobox"));
 
