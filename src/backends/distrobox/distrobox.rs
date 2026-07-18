@@ -610,6 +610,10 @@ impl Distrobox {
         (self.cmd_factory)()
     }
 
+    pub fn command_runner(&self) -> &CommandRunner {
+        &self.cmd_runner
+    }
+
     pub fn null_command_runner(responses: &[DistroboxCommandRunnerResponse]) -> CommandRunner {
         let mut builder = NullCommandRunnerBuilder::new();
         for res in responses {

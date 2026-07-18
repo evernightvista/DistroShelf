@@ -13,7 +13,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::backends::Status;
-use crate::backends::container_runtime::DetectedRuntime;
+use crate::backends::container_runtime::{ContainerRuntime, DetectedRuntime};
 use crate::backends::podman::PodmanEvent;
 use crate::distrobox_init_migration::{StaleContainer, current_init_path, find_stale_containers};
 use crate::fakers::{Command, CommandRunner, Settings};
@@ -213,17 +213,19 @@ impl MainStore {
             });
         }
 
-        // Set up downloaded images fetcher (no ref cycle: captures only runtime_query)
+        // Set up downloaded images fetcher (no ref cycle: captures only cloned data)
         {
             let runtime_query = this.runtime_query();
+            let command_runner = this.command_runner();
             this.imp().downloaded_images_query.set_fetcher(move || {
                 let runtime_query = runtime_query.clone();
+                let command_runner = command_runner.clone();
                 async move {
                     runtime_query
                         .data()
                         .ok_or_else(|| anyhow::anyhow!("No container runtime available"))?
                         .runtime
-                        .downloaded_images()
+                        .downloaded_images(&command_runner)
                         .await
                 }
             });
@@ -233,6 +235,7 @@ impl MainStore {
         {
             let distrobox = this.distrobox().clone();
             let runtime_query = this.runtime_query();
+            let command_runner = this.command_runner();
             let main_weak = this.downgrade();
             let on_containers_changed: Rc<dyn Fn()> = Rc::new({
                 let main_weak = main_weak.clone();
@@ -245,13 +248,18 @@ impl MainStore {
             this.imp().containers_query.set_fetcher(move || {
                 let distrobox = distrobox.clone();
                 let runtime_query = runtime_query.clone();
+                let command_runner = command_runner.clone();
                 let on_containers_changed = on_containers_changed.clone();
                 async move {
                     let mut containers = distrobox.list().await?;
 
                     let ids: Vec<&str> = containers.values().map(|c| c.id.as_str()).collect();
                     if let Some(detected) = runtime_query.data() {
-                        match detected.runtime.inspect_containers(&ids).await {
+                        match detected
+                            .runtime
+                            .inspect_containers(&command_runner, &ids)
+                            .await
+                        {
                             Ok(inspected) => {
                                 for info in containers.values_mut() {
                                     if let Some(inspect_info) = inspected.get(&info.id) {
@@ -394,9 +402,9 @@ impl MainStore {
 
         glib::MainContext::ref_thread_default().spawn_local(async move {
             info!("Starting podman events listener");
-            let podman = crate::backends::podman::Podman::new(Rc::new(command_runner.clone()));
+            let podman = ContainerRuntime::podman();
 
-            let stream = match podman.listen_events() {
+            let stream = match podman.listen_events(&command_runner) {
                 Ok(stream) => stream,
                 Err(e) => {
                     warn!("Failed to start podman events listener: {}", e);
@@ -502,7 +510,7 @@ impl MainStore {
 
         let stale = find_stale_containers(
             &self.command_runner(),
-            detected.runtime.as_ref(),
+            &detected.runtime,
             &containers,
             &current_init,
         )
@@ -553,7 +561,6 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::backends::podman::Podman;
     use crate::backends::{ContainerInfo, Distrobox, DistroboxCommandRunnerResponse};
     use crate::fakers::NullCommandRunnerBuilder;
     use crate::gtk_utils::test_utils::spin_main_context_until;
@@ -821,7 +828,7 @@ mod tests {
             )
             .build();
         let runtime = DetectedRuntime {
-            runtime: Rc::new(Podman::new(Rc::new(runner.clone()))),
+            runtime: ContainerRuntime::podman(),
             version: "4.9.3".into(),
         };
         let store = MainStore::new(

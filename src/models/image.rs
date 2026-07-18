@@ -2,8 +2,8 @@ use serde::Deserialize;
 
 /// DTO for parsing `docker images --format json` / `podman images --format json` output.
 /// Immediately flattened into `HashSet<String>` of image names by
-/// [`Docker::downloaded_images`](crate::backends::docker::Docker) — never stored or
-/// used as an application model.
+/// [`ContainerRuntime::downloaded_images`](crate::backends::container_runtime::ContainerRuntime::downloaded_images)
+/// — never stored or used as an application model.
 #[derive(Debug, Clone, Deserialize, Hash, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct Image {

@@ -1,25 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
+    path::Path,
     pin::Pin,
-    rc::Rc,
     task::{Context, Poll},
 };
 
-use async_trait::async_trait;
 use futures::Stream;
 use serde::Deserialize;
 
-use crate::{
-    backends::container_runtime::{ContainerInspectInfo, ContainerRuntime, Usage},
-    fakers::{Child, Command, CommandRunner, FdMode},
-};
-
-pub fn map_docker_to_podman(mut command: Command) -> Command {
-    if command.program == "docker" {
-        command.program = "podman".into();
-    }
-    command
-}
+use crate::fakers::{Child, Command, CommandRunner, FdMode};
 
 /// Podman event structure
 #[derive(Debug, Clone, Deserialize)]
@@ -75,115 +64,44 @@ impl Stream for PodmanEventStream {
     }
 }
 
-// This is a wrapper around Docker that maps commands to Podman
-pub struct Podman {
-    docker: crate::backends::docker::Docker,
-}
+/// Spawns `<program> events --format json` and returns a stream of event
+/// lines. Callers go through
+/// [`ContainerRuntime::listen_events`](crate::backends::container_runtime::ContainerRuntime::listen_events),
+/// which supplies the binary path of its `Podman` variant.
+pub(crate) fn listen_events(
+    runner: &CommandRunner,
+    program: &Path,
+) -> Result<PodmanEventStream, std::io::Error> {
+    use futures::io::{AsyncBufReadExt, BufReader};
 
-impl Podman {
-    pub fn new(cmd_runner: Rc<CommandRunner>) -> Self {
-        Self {
-            docker: crate::backends::docker::Docker::new(Rc::new(
-                cmd_runner.map_cmd(map_docker_to_podman),
-            )),
-        }
-    }
-    /// Listen to podman events and return a stream of event lines
-    pub fn listen_events(&self) -> Result<PodmanEventStream, std::io::Error> {
-        use futures::io::{AsyncBufReadExt, BufReader};
+    // Create the podman events command
+    let mut cmd = Command::new(program);
+    cmd.arg("events");
+    cmd.arg("--format");
+    cmd.arg("json");
+    cmd.stdout = FdMode::Pipe;
+    cmd.stderr = FdMode::Pipe;
 
-        // Create the podman events command
-        let mut cmd = Command::new("podman");
-        cmd.arg("events");
-        cmd.arg("--format");
-        cmd.arg("json");
-        cmd.stdout = FdMode::Pipe;
-        cmd.stderr = FdMode::Pipe;
+    // Spawn the command
+    let mut child = runner.spawn(cmd)?;
 
-        // Spawn the command
-        let mut child = self.docker.cmd_runner.spawn(cmd)?;
+    // Get stdout and create a buffered reader
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| std::io::Error::other("No stdout available"))?;
 
-        // Get stdout and create a buffered reader
-        let stdout = child
-            .take_stdout()
-            .ok_or_else(|| std::io::Error::other("No stdout available"))?;
+    let bufread = BufReader::new(stdout);
+    let lines = bufread.lines();
 
-        let bufread = BufReader::new(stdout);
-        let lines = bufread.lines();
-
-        Ok(PodmanEventStream {
-            lines: Some(lines),
-            _child: Some(child),
-        })
-    }
-}
-
-#[async_trait(?Send)]
-impl ContainerRuntime for Podman {
-    fn name(&self) -> &'static str {
-        "podman"
-    }
-
-    async fn version(&self) -> anyhow::Result<String> {
-        self.docker.version().await
-    }
-
-    async fn usage(&self, container_id: &str) -> anyhow::Result<Usage> {
-        self.docker.usage(container_id).await
-    }
-
-    async fn downloaded_images(&self) -> anyhow::Result<HashSet<String>> {
-        self.docker.downloaded_images().await
-    }
-
-    async fn inspect_container(&self, container_id: &str) -> anyhow::Result<ContainerInspectInfo> {
-        self.docker.inspect_container(container_id).await
-    }
-
-    async fn inspect_containers(
-        &self,
-        container_ids: &[&str],
-    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>> {
-        self.docker.inspect_containers(container_ids).await
-    }
-
-    async fn entrypoint_mount_source(&self, container_id: &str) -> anyhow::Result<Option<String>> {
-        self.docker.entrypoint_mount_source(container_id).await
-    }
+    Ok(PodmanEventStream {
+        lines: Some(lines),
+        _child: Some(child),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_map_docker_to_podman() {
-        let cmd = Command::new("docker");
-        let mapped = map_docker_to_podman(cmd);
-
-        assert_eq!(mapped.program.to_string_lossy(), "podman");
-    }
-
-    #[test]
-    fn test_map_docker_to_podman_with_args() {
-        let mut cmd = Command::new("docker");
-        cmd.args(["ps", "-a"]);
-
-        let mapped = map_docker_to_podman(cmd);
-
-        assert_eq!(mapped.program.to_string_lossy(), "podman");
-        assert_eq!(mapped.args[0].to_string_lossy(), "ps");
-        assert_eq!(mapped.args[1].to_string_lossy(), "-a");
-    }
-
-    #[test]
-    fn test_map_docker_to_podman_non_docker() {
-        let cmd = Command::new("other-command");
-        let mapped = map_docker_to_podman(cmd);
-
-        // Non-docker commands should not be changed
-        assert_eq!(mapped.program.to_string_lossy(), "other-command");
-    }
 
     #[test]
     fn test_podman_event_is_distrobox() {

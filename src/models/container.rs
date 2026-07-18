@@ -160,15 +160,19 @@ impl Container {
 
         let this_clone = this.clone();
         let runtime_query = runtime_query.clone();
+        let usage_distrobox = distrobox.clone();
         this.usage().set_fetcher(move || {
             let this = this_clone.clone();
             let runtime_query = runtime_query.clone();
+            let distrobox = usage_distrobox.clone();
             async move {
                 let runtime = runtime_query
                     .data()
                     .ok_or_else(|| anyhow::anyhow!("Container runtime not available"))?
                     .runtime;
-                let usage = runtime.usage(&this.name()).await?;
+                let usage = runtime
+                    .usage(distrobox.command_runner(), &this.name())
+                    .await?;
                 Ok(usage)
             }
         });

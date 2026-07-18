@@ -1,34 +1,280 @@
 // A container runtime is docker/podman/etc.
 
-use std::{collections::HashMap, collections::HashSet, rc::Rc};
+use std::{
+    collections::HashMap,
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::info;
 
-use super::docker::Docker;
-
-use crate::{backends::podman::Podman, fakers::CommandRunner};
+use crate::{
+    backends::podman::PodmanEventStream,
+    fakers::{Command, CommandRunner, FdMode},
+    models::Image,
+};
 
 /// The in-container destination of the `distrobox-init` bind-mount. Distrobox
 /// mounts the host's `distrobox-init` at this path and uses it as entrypoint.
 pub const ENTRYPOINT_MOUNT_DESTINATION: &str = "/usr/bin/entrypoint";
 
-#[async_trait(?Send)]
-pub trait ContainerRuntime {
-    fn name(&self) -> &'static str;
-    async fn version(&self) -> anyhow::Result<String>;
-    async fn usage(&self, container_id: &str) -> anyhow::Result<Usage>;
-    async fn downloaded_images(&self) -> anyhow::Result<HashSet<String>>;
-    async fn inspect_container(&self, container_id: &str) -> anyhow::Result<ContainerInspectInfo>;
-    async fn inspect_containers(
+/// The container runtime distrobox drives under the hood.
+///
+/// This is a plain value type: each variant carries the path (or bare name,
+/// resolved via `PATH`) of the runtime binary, and every operation borrows the
+/// [`CommandRunner`] to execute it. Podman's CLI is a drop-in replacement for
+/// Docker's, so both variants share the same command implementations and only
+/// the invoked binary differs.
+///
+/// [`ContainerRuntime::Null`] is the null object used where no runtime is
+/// available (defaults, tests): every operation fails with a uniform error.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ContainerRuntime {
+    #[default]
+    Null,
+    Docker(PathBuf),
+    Podman(PathBuf),
+}
+
+#[derive(serde::Deserialize)]
+struct InspectOutput {
+    #[serde(rename = "Id", default)]
+    id: Option<String>,
+    #[serde(rename = "Created", default)]
+    created: Option<String>,
+    #[serde(rename = "State", default)]
+    state: Option<InspectState>,
+}
+
+#[derive(serde::Deserialize)]
+struct InspectMount {
+    #[serde(rename = "Source", default)]
+    source: Option<String>,
+    #[serde(rename = "Destination", default)]
+    destination: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct InspectState {
+    #[serde(rename = "StartedAt", default)]
+    started_at: Option<String>,
+    #[serde(rename = "FinishedAt", default)]
+    finished_at: Option<String>,
+}
+
+impl ContainerRuntime {
+    /// A podman runtime invoked as bare `podman`, resolved via `PATH`.
+    pub fn podman() -> Self {
+        Self::Podman(PathBuf::from("podman"))
+    }
+
+    /// A docker runtime invoked as bare `docker`, resolved via `PATH`.
+    pub fn docker() -> Self {
+        Self::Docker(PathBuf::from("docker"))
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Docker(_) => "docker",
+            Self::Podman(_) => "podman",
+        }
+    }
+
+    fn binary(&self) -> anyhow::Result<&Path> {
+        match self {
+            Self::Null => anyhow::bail!("No container runtime available"),
+            Self::Docker(path) | Self::Podman(path) => Ok(path),
+        }
+    }
+
+    pub async fn version(&self, runner: &CommandRunner) -> anyhow::Result<String> {
+        let mut cmd = Command::new(self.binary()?);
+        cmd.arg("--version");
+
+        let output = runner.output(cmd).await?;
+
+        // A command that spawns but exits non-zero must be treated as "not
+        // installed". This matters under Flatpak, where the runtime check runs
+        // `flatpak-spawn --host podman --version`: flatpak-spawn itself spawns
+        // successfully, so without this check a missing host binary would be
+        // mistaken for an available runtime.
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "version check failed ({}): {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let version = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(version.trim().to_string())
+    }
+
+    pub async fn downloaded_images(
         &self,
+        runner: &CommandRunner,
+    ) -> anyhow::Result<HashSet<String>> {
+        let mut cmd = Command::new(self.binary()?);
+        cmd.arg("images").arg("--format").arg("json");
+
+        let output = runner.output_string(cmd).await?;
+        // Some versions of podman/docker might return empty string if no images?
+        if output.trim().is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        // Handle potential JSON Lines vs JSON Array
+        // Try parsing as array first
+        let images_vec: Vec<Image> = match serde_json::from_str::<Vec<Image>>(&output) {
+            Ok(images) => images,
+            Err(_) => {
+                // Try parsing as JSON lines
+                let mut images = Vec::new();
+                for line in output.lines() {
+                    if !line.trim().is_empty() {
+                        images.push(serde_json::from_str::<Image>(line)?);
+                    }
+                }
+                images
+            }
+        };
+
+        let names: HashSet<String> = images_vec
+            .into_iter()
+            .flat_map(|img| img.names.unwrap_or_default())
+            .collect();
+
+        Ok(names)
+    }
+
+    pub async fn usage(&self, runner: &CommandRunner, container_id: &str) -> anyhow::Result<Usage> {
+        let mut cmd = Command::new(self.binary()?);
+        cmd.arg("stats");
+        cmd.arg("--no-stream");
+        cmd.arg("--format");
+        cmd.arg("json");
+        cmd.arg(container_id);
+        cmd.stdout = FdMode::Pipe;
+        cmd.stderr = FdMode::Pipe;
+
+        let output = runner.output_string(cmd).await?;
+        let usages: Vec<Usage> = serde_json::from_str(&output)?;
+
+        usages
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No stats found"))
+    }
+
+    pub async fn inspect_containers(
+        &self,
+        runner: &CommandRunner,
         container_ids: &[&str],
-    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>>;
+    ) -> anyhow::Result<HashMap<String, ContainerInspectInfo>> {
+        if container_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut cmd = Command::new(self.binary()?);
+        cmd.arg("inspect");
+        for id in container_ids {
+            cmd.arg(id);
+        }
+
+        let output = runner.output_string(cmd).await?;
+        let inspected: Vec<InspectOutput> = serde_json::from_str(&output)?;
+
+        let mut result = HashMap::new();
+        for entry in inspected {
+            let full_id = entry
+                .id
+                .as_deref()
+                .map(|s| s.trim_start_matches("sha256:"))
+                .unwrap_or("");
+
+            let matched_id = container_ids
+                .iter()
+                .find(|short_id| full_id.starts_with(*short_id))
+                .map(|&s| s.to_string());
+
+            if let Some(id) = matched_id {
+                let info = ContainerInspectInfo {
+                    created_at: entry.created,
+                    started_at: entry.state.as_ref().and_then(|s| {
+                        s.started_at
+                            .as_deref()
+                            .filter(|t| *t != "0001-01-01T00:00:00Z")
+                            .map(|t| t.to_string())
+                    }),
+                    finished_at: entry.state.as_ref().and_then(|s| {
+                        s.finished_at
+                            .as_deref()
+                            .filter(|t| *t != "0001-01-01T00:00:00Z")
+                            .map(|t| t.to_string())
+                    }),
+                };
+                result.insert(id, info);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Returns the host-side source path of the bind-mount whose destination
     /// is [`ENTRYPOINT_MOUNT_DESTINATION`], or `None` when the container has
     /// no such mount (e.g. it was not created by distrobox).
-    async fn entrypoint_mount_source(&self, container_id: &str) -> anyhow::Result<Option<String>>;
+    pub async fn entrypoint_mount_source(
+        &self,
+        runner: &CommandRunner,
+        container_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let mut cmd = Command::new(self.binary()?);
+        cmd.arg("inspect");
+        cmd.arg("--format");
+        cmd.arg("{{ json .Mounts }}");
+        cmd.arg(container_id);
+
+        let output = runner.output(cmd).await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "inspect of {} failed ({}): {}",
+                container_id,
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let text = stdout.trim();
+        if text.is_empty() || text == "null" {
+            return Ok(None);
+        }
+
+        let mounts: Vec<InspectMount> = serde_json::from_str(text)?;
+        Ok(mounts
+            .into_iter()
+            .find(|m| m.destination.as_deref() == Some(ENTRYPOINT_MOUNT_DESTINATION))
+            .and_then(|m| m.source))
+    }
+
+    /// Streams runtime events as JSON lines. Only supported with Podman; the
+    /// other variants fail so callers degrade to manual refresh.
+    pub fn listen_events(
+        &self,
+        runner: &CommandRunner,
+    ) -> Result<PodmanEventStream, std::io::Error> {
+        match self {
+            Self::Podman(path) => crate::backends::podman::listen_events(runner, path),
+            Self::Docker(_) | Self::Null => Err(std::io::Error::other(format!(
+                "event streaming is not supported with the {} runtime",
+                self.name()
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,34 +327,25 @@ pub struct Usage {
 /// version string obtained during detection. The version probe already runs as
 /// part of detection, so we keep its result here instead of re-fetching it for
 /// display.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DetectedRuntime {
-    pub runtime: Rc<dyn ContainerRuntime>,
+    pub runtime: ContainerRuntime,
     pub version: String,
-}
-
-impl std::fmt::Debug for DetectedRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DetectedRuntime")
-            .field("name", &self.runtime.name())
-            .field("version", &self.version)
-            .finish()
-    }
 }
 
 pub async fn get_container_runtime(command_runner: CommandRunner) -> Option<DetectedRuntime> {
     // Prefer Podman when both are available because Podman is rootless by default
-    let podman = Podman::new(Rc::new(command_runner.clone()));
-    match podman.version().await {
+    let podman = ContainerRuntime::podman();
+    match podman.version(&command_runner).await {
         Ok(version) => Some(DetectedRuntime {
-            runtime: Rc::new(podman),
+            runtime: podman,
             version,
         }),
         Err(podman_err) => {
-            let docker = Docker::new(Rc::new(command_runner));
-            match docker.version().await {
+            let docker = ContainerRuntime::docker();
+            match docker.version(&command_runner).await {
                 Ok(version) => Some(DetectedRuntime {
-                    runtime: Rc::new(docker),
+                    runtime: docker,
                     version,
                 }),
                 Err(docker_err) => {
@@ -179,14 +416,50 @@ mod tests {
             )
             .build();
 
-        let docker = Docker::new(Rc::new(runner));
-        let result = block_on(docker.version());
+        let result = block_on(ContainerRuntime::docker().version(&runner));
 
         assert!(
             result.is_err(),
             "version() must error when the command exits non-zero, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_null_runtime_fails_every_operation() {
+        // The Null variant must never issue commands: it fails uniformly so
+        // callers treat it exactly like "no runtime detected".
+        let runner = NullCommandRunnerBuilder::new().build();
+        let tracker = runner.output_tracker();
+        let null = ContainerRuntime::Null;
+
+        assert!(block_on(null.version(&runner)).is_err());
+        assert!(block_on(null.downloaded_images(&runner)).is_err());
+        assert!(block_on(null.usage(&runner, "ubuntu")).is_err());
+        assert!(block_on(null.inspect_containers(&runner, &["ubuntu"])).is_err());
+        assert!(block_on(null.entrypoint_mount_source(&runner, "ubuntu")).is_err());
+        assert!(null.listen_events(&runner).is_err());
+        assert!(
+            tracker.items().is_empty(),
+            "the null runtime must not run any command"
+        );
+    }
+
+    #[test]
+    fn test_runtime_invokes_its_binary_path() {
+        // The variant payload is the binary to invoke, so a custom path must
+        // be used verbatim instead of the bare program name.
+        let runner = NullCommandRunnerBuilder::new()
+            .cmd(
+                &["/usr/local/bin/podman", "--version"],
+                "podman version 4.9.3",
+            )
+            .build();
+
+        let podman = ContainerRuntime::Podman(PathBuf::from("/usr/local/bin/podman"));
+        let version = block_on(podman.version(&runner)).expect("version should succeed");
+
+        assert_eq!(version, "podman version 4.9.3");
     }
 
     #[test]
@@ -230,7 +503,7 @@ mod tests {
         let runtime =
             block_on(get_container_runtime(runner)).expect("a runtime should be detected");
 
-        assert_eq!(runtime.runtime.name(), "docker");
+        assert_eq!(runtime.runtime, ContainerRuntime::docker());
     }
 
     #[test]
@@ -242,6 +515,6 @@ mod tests {
         let runtime =
             block_on(get_container_runtime(runner)).expect("a runtime should be detected");
 
-        assert_eq!(runtime.runtime.name(), "podman");
+        assert_eq!(runtime.runtime, ContainerRuntime::podman());
     }
 }

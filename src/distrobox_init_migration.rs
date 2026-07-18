@@ -88,13 +88,13 @@ pub fn current_init_path(distrobox_exe_path: &str) -> Option<PathBuf> {
 /// which also makes re-running this check on migrated containers a no-op.
 pub async fn find_stale_containers(
     runner: &CommandRunner,
-    runtime: &dyn ContainerRuntime,
+    runtime: &ContainerRuntime,
     containers: &[(String, bool)],
     current_init: &Path,
 ) -> Vec<StaleContainer> {
     let mut stale = Vec::new();
     for (name, running) in containers {
-        let source = match runtime.entrypoint_mount_source(name).await {
+        let source = match runtime.entrypoint_mount_source(runner, name).await {
             Ok(Some(source)) => PathBuf::from(source),
             Ok(None) => {
                 tracing::warn!(
@@ -290,12 +290,10 @@ pub async fn migrate_stale_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::podman::Podman;
     use crate::fakers::{CommandRunnerEvent, NullCommandRunnerBuilder};
     use smol::block_on;
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
-    use std::rc::Rc;
 
     const CURRENT_INIT: &str =
         "/home/user/.local/share/distroshelf/distrobox-bundled/distrobox-init";
@@ -346,7 +344,7 @@ mod tests {
                 || Ok(String::new()),
             )
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -371,7 +369,7 @@ mod tests {
         let runner = NullCommandRunnerBuilder::new()
             .cmd_full(inspect_cmd("ubuntu"), move || Ok(json.clone()))
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -398,7 +396,7 @@ mod tests {
                 || Ok(String::new()),
             )
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -423,7 +421,7 @@ mod tests {
                 "", // exists: exit status 0
             )
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -443,7 +441,7 @@ mod tests {
                 Ok(r#"[{"Type":"bind","Source":"/tmp","Destination":"/tmp"}]"#.to_string())
             })
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -464,7 +462,7 @@ mod tests {
                 || Ok(String::new()),
             )
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
@@ -487,7 +485,7 @@ mod tests {
                 || Ok(String::new()),
             )
             .build();
-        let podman = Podman::new(Rc::new(runner.clone()));
+        let podman = ContainerRuntime::podman();
 
         let stale = block_on(find_stale_containers(
             &runner,
