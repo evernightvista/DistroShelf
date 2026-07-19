@@ -80,6 +80,34 @@
   </screenshots>
 
   <releases>
+    <release version="1.5.0" date="2026-07-19">
+      <description translate="no">
+        <ul>
+          <li>New: Container list can now be sorted by creation date and last-used date.</li>
+          <li>New: Ctrl+Shift+C / Ctrl+Shift+V keyboard shortcuts for copy-paste in the integrated terminal.</li>
+          <li>Improved: Clearer error reporting in the create container dialog.</li>
+          <li>Improved: Cleaner Distrobox version display in preferences.</li>
+          <li>Improved: Reduced unnecessary resource usage fetches on container status changes.</li>
+          <li>Improved: Migration banner moved below the sidebar headerbar.</li>
+          <li>Improved: Show a close button when a task ends.</li>
+          <li>Changed: Renamed the "System" Distrobox source to "Host" for clarity.</li>
+          <li>Fix: Cloning failing when the source image is missing.</li>
+          <li>Fix: Container terminal inheriting the host working directory.</li>
+          <li>Fix: Several previously-untranslated UI messages.</li>
+          <li>Fix: Container runtime detection ignoring failed version checks.</li>
+          <li>Fix: Welcome view carousel not resetting to the requirements page when reshown.</li>
+          <li>Fix: Welcome view requirement status desyncing from underlying query data.</li>
+          <li>Fix: Default terminal setting preventing terminal detection on first launch.</li>
+          <li>Fix: Repair stale Distrobox init paths during container migration.</li>
+          <li>Fix: Repair all Distrobox bind-mount scripts during migration, not just init.</li>
+          <li>Fix: Last-used-date sorting comparison for Podman running containers.</li>
+          <li>Fix: Container sort key persistence and action state sync.</li>
+          <li>Fix: Concurrency bugs in query signals and shared state.</li>
+          <li>Fix: Centering of Debian and openSUSE distribution icons.</li>
+          <li>i18n: Added Chinese (Traditional) translation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.8" date="2026-03-16">
       <description translate="no">
         <ul>
