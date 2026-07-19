@@ -426,12 +426,7 @@ impl DistroShelfApplication {
             _ => Settings::new_null(),
         };
 
-        // The single file-system instance shared by the whole app. Null
-        // store types use in-memory storage; Real hits the host file system.
-        let file_system = match distrobox_store_ty {
-            DistroboxStoreTy::Real => FileSystem::new_real(),
-            _ => FileSystem::new_null(),
-        };
+        let file_system = distrobox_store_ty.null_file_system();
 
         let root_store = RootStore::new(command_runner.clone(), settings, file_system);
         root_store.start_background_tasks();
