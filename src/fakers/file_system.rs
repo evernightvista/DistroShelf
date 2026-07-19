@@ -180,6 +180,8 @@ impl NullFileSystem {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut files = self.files.borrow_mut();
+        let mut dirs = self.dirs.borrow_mut();
+
         let to_move: Vec<(PathBuf, String)> = files
             .iter()
             .filter(|(k, _)| k.starts_with(from))
@@ -193,6 +195,21 @@ impl NullFileSystem {
             let new_key = to.join(suffix);
             files.insert(new_key, value);
         }
+
+        let dirs_to_move: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|d| d.starts_with(from))
+            .cloned()
+            .collect();
+        for old_dir in &dirs_to_move {
+            dirs.remove(old_dir);
+        }
+        for old_dir in &dirs_to_move {
+            let suffix = old_dir.strip_prefix(from).unwrap();
+            let new_dir = to.join(suffix);
+            dirs.insert(new_dir);
+        }
+
         Ok(())
     }
 
@@ -446,6 +463,50 @@ mod tests {
     fn test_set_unix_executable_null() {
         let fs = FileSystem::new_null();
         fs.set_unix_executable(Path::new("/bin/tool")).unwrap();
+    }
+
+    #[test]
+    fn test_read_dir_not_found() {
+        let fs = FileSystem::new_null();
+        let err = fs.read_dir(Path::new("/nonexistent")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn test_rename_updates_dirs() {
+        let fs = FileSystem::new_null();
+        fs.create_dir_all(Path::new("/old/sub")).unwrap();
+        fs.write(Path::new("/old/sub/file.txt"), "hello").unwrap();
+        fs.rename(Path::new("/old"), Path::new("/new")).unwrap();
+
+        let err = fs.read_dir(Path::new("/old")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        let entries = fs.read_dir(Path::new("/new")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains(&PathBuf::from("sub")));
+
+        let entries = fs.read_dir(Path::new("/new/sub")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains(&PathBuf::from("file.txt")));
+
+        assert_eq!(
+            fs.read_to_string(Path::new("/new/sub/file.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn test_rename_target_parents_dont_exist() {
+        let fs = FileSystem::new_null();
+        fs.write(Path::new("/src/file.txt"), "data").unwrap();
+        fs.rename(Path::new("/src"), Path::new("/target/deep/nested")).unwrap();
+
+        assert!(!fs.exists(Path::new("/src/file.txt")));
+        assert_eq!(
+            fs.read_to_string(Path::new("/target/deep/nested/file.txt")).unwrap(),
+            "data"
+        );
     }
 
     #[test]

@@ -355,7 +355,6 @@ impl RootStore {
             async move {
                 let Some(path) =
                     crate::distrobox_downloader::resolve_bundled_distrobox_path(&this_clone.file_system())
-                        .await
                 else {
                     return Ok(None);
                 };
@@ -399,7 +398,6 @@ impl RootStore {
                                 if crate::distrobox_downloader::resolve_bundled_distrobox_path(
                                     &obj_clone.file_system(),
                                 )
-                                .await
                                 .is_none()
                                 {
                                     obj_clone.download_distrobox();
