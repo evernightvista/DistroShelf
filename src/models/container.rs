@@ -80,7 +80,10 @@ mod imp {
                     });
                     q
                 },
-                usage: Query::new("usage".into(), || async { Ok(Usage::default()) }),
+                usage: {
+                    Query::new("usage".into(), || async { Ok(Usage::default()) })
+                        .with_priority(glib::Priority::LOW)
+                },
             }
         }
     }

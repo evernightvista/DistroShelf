@@ -245,6 +245,8 @@ mod imp {
                 .set_resource_key("create_distrobox_errors");
             self.errors_query
                 .set_refetch_strategy(Query::debounce(Duration::from_millis(500)));
+            self.errors_query
+                .set_priority(glib::Priority::HIGH);
         }
     }
 
@@ -508,13 +510,14 @@ impl CreateDistroboxDialog {
         ));
 
         // Prefill wiring: debounce name changes to suggest an image when user hasn't interacted
-        let prefill_query: Query<Option<String>> = Query::new(
-            "prefill-suggestions".to_string(),
-            clone!(
-                #[weak(rename_to=this)]
-                self,
-                #[upgrade_or_panic]
-                move || async move {
+        let prefill_query: Query<Option<String>> = {
+            let q = Query::new(
+                "prefill-suggestions".to_string(),
+                clone!(
+                    #[weak(rename_to=this)]
+                    self,
+                    #[upgrade_or_panic]
+                    move || async move {
                     let imp = this.imp();
                     let text = imp.name_row.text().to_string();
 
@@ -550,7 +553,10 @@ impl CreateDistroboxDialog {
                     Ok(suggested_opt)
                 }
             ),
-        );
+            );
+            q.set_priority(glib::Priority::HIGH);
+            q
+        };
 
         prefill_query.connect_success(clone!(
             #[weak(rename_to=this)]
@@ -700,13 +706,14 @@ impl CreateDistroboxDialog {
         content.append(&create_btn);
 
         // Create ini_content_query for downloading .ini file
-        let ini_content_query: Query<String> = Query::new(
-            "ini-content-download".to_string(),
-            clone!(
-                #[weak(rename_to=this)]
-                self,
-                #[upgrade_or_panic]
-                move || async move {
+        let ini_content_query: Query<String> = {
+            let q = Query::new(
+                "ini-content-download".to_string(),
+                clone!(
+                    #[weak(rename_to=this)]
+                    self,
+                    #[upgrade_or_panic]
+                    move || async move {
                     if let Some(url_text) = this.assemble_url() {
                         if url_text.is_empty() {
                             return Err(anyhow::anyhow!("URL is empty"));
@@ -717,7 +724,10 @@ impl CreateDistroboxDialog {
                     }
                 }
             ),
-        );
+            );
+            q.set_priority(glib::Priority::HIGH);
+            q
+        };
         ini_content_query.set_timeout(Duration::from_secs(10));
 
         // Wire ini_content_query success handler

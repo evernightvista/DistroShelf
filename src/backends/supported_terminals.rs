@@ -122,10 +122,18 @@ mod imp {
                 custom_list_path,
                 command_runner: OnceCell::new(),
                 file_system: RefCell::new(FileSystem::new_null()),
-                json_terminals_query: Query::new("json_terminals".into(), || async { Ok(vec![]) }),
-                flatpak_terminals_query: Query::new("flatpak_terminals".into(), || async {
-                    Ok(vec![])
-                }),
+                json_terminals_query: {
+                    let q = Query::new("json_terminals".into(), || async { Ok(vec![]) });
+                    q.set_priority(glib::Priority::LOW);
+                    q
+                },
+                flatpak_terminals_query: {
+                    let q = Query::new("flatpak_terminals".into(), || async {
+                        Ok(vec![])
+                    });
+                    q.set_priority(glib::Priority::LOW);
+                    q
+                },
             }
         }
     }
