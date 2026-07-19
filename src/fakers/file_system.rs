@@ -54,7 +54,13 @@ impl FileSystem {
     pub fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         match self {
             FileSystem::Real => std::fs::create_dir_all(path),
-            FileSystem::Null(_) => Ok(()),
+            FileSystem::Null(null) => {
+                let mut dirs = null.dirs.borrow_mut();
+                for ancestor in path.ancestors() {
+                    dirs.insert(ancestor.to_path_buf());
+                }
+                Ok(())
+            }
         }
     }
 
@@ -119,6 +125,7 @@ impl std::fmt::Debug for FileSystem {
             FileSystem::Null(null) => f
                 .debug_tuple("FileSystem::Null")
                 .field(&*null.files.borrow())
+                .field(&*null.dirs.borrow())
                 .finish(),
         }
     }
@@ -130,6 +137,7 @@ impl std::fmt::Debug for FileSystem {
 #[derive(Clone, Default)]
 pub struct NullFileSystem {
     files: Rc<RefCell<HashMap<PathBuf, String>>>,
+    dirs: Rc<RefCell<HashSet<PathBuf>>>,
 }
 
 impl NullFileSystem {
@@ -149,7 +157,7 @@ impl NullFileSystem {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        self.files.borrow().contains_key(path)
+        self.files.borrow().contains_key(path) || self.dirs.borrow().contains(path)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -165,6 +173,8 @@ impl NullFileSystem {
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut files = self.files.borrow_mut();
         files.retain(|k, _| !k.starts_with(path));
+        let mut dirs = self.dirs.borrow_mut();
+        dirs.retain(|d| !d.starts_with(path));
         Ok(())
     }
 
@@ -188,9 +198,32 @@ impl NullFileSystem {
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
         let files = self.files.borrow();
+        let dirs = self.dirs.borrow();
+
+        let has_matching_files = files.keys().any(|k| k.starts_with(path));
+        let is_dir = dirs.contains(path);
+
+        if !is_dir && !has_matching_files {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{path:?}"),
+            ));
+        }
+
         let mut seen: HashSet<PathBuf> = HashSet::new();
         for key in files.keys() {
             let Ok(suffix) = key.strip_prefix(path) else {
+                continue;
+            };
+            if let Some(first) = suffix.iter().next() {
+                seen.insert(first.into());
+            }
+        }
+        for dir in dirs.iter() {
+            if dir == path {
+                continue;
+            }
+            let Ok(suffix) = dir.strip_prefix(path) else {
                 continue;
             };
             if let Some(first) = suffix.iter().next() {
@@ -207,12 +240,14 @@ impl NullFileSystem {
 #[derive(Clone, Default)]
 pub struct NullFileSystemBuilder {
     files: HashMap<PathBuf, String>,
+    dirs: HashSet<PathBuf>,
 }
 
 impl NullFileSystemBuilder {
     pub fn new() -> Self {
         Self {
             files: HashMap::new(),
+            dirs: HashSet::new(),
         }
     }
 
@@ -222,9 +257,16 @@ impl NullFileSystemBuilder {
         self
     }
 
+    #[allow(dead_code)]
+    pub fn dir(&mut self, path: impl Into<PathBuf>) -> &mut Self {
+        self.dirs.insert(path.into());
+        self
+    }
+
     pub fn build(&self) -> FileSystem {
         FileSystem::Null(NullFileSystem {
             files: Rc::new(RefCell::new(self.files.clone())),
+            dirs: Rc::new(RefCell::new(self.dirs.clone())),
         })
     }
 }
@@ -319,6 +361,22 @@ mod tests {
     fn test_create_dir_all_null() {
         let fs = FileSystem::new_null();
         fs.create_dir_all(Path::new("/some/dir")).unwrap();
+        assert!(fs.exists(Path::new("/some/dir")));
+        assert!(fs.exists(Path::new("/some")));
+        assert!(fs.exists(Path::new("/")));
+        assert!(!fs.exists(Path::new("/nonexistent")));
+    }
+
+    #[test]
+    fn test_nullfs_directory_tracking() {
+        let fs = FileSystem::new_null();
+        let dir = Path::new("/my/test/dir");
+        fs.create_dir_all(dir).unwrap();
+        assert!(fs.exists(dir));
+        assert!(fs.exists(Path::new("/my/test")));
+        assert!(fs.exists(Path::new("/my")));
+        let entries = fs.read_dir(dir).unwrap();
+        assert!(entries.is_empty());
     }
 
     #[test]
