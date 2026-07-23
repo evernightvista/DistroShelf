@@ -206,3 +206,13 @@ where:
 - <description> — a short description of the changes made
 - [optional body] — detailed information about the changes
 - [optional trailer(s)] — additional metadata about the commit
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default names. See `docs/agents/triage-labels.md`.
