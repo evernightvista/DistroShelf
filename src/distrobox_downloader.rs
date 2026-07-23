@@ -8,40 +8,98 @@ use gtk::glib;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const DISTROBOX_VERSION: &str = "1.8.2.5";
-// SHA256 of the tar.gz file from github
+pub(crate) mod domain {
+    use std::path::PathBuf;
+
+    pub const DISTROBOX_VERSION: &str = "1.8.2.5";
+
+    const BUNDLED_DIR_NAME: &str = "distrobox-bundled";
+    const VERSION_FILE: &str = "VERSION";
+
+    pub fn parse_semver(v: &str) -> Option<Vec<u32>> {
+        v.split('.').map(|p| p.parse::<u32>().ok()).collect()
+    }
+
+    pub fn version_less_than(a: &str, b: &str) -> bool {
+        match (parse_semver(a), parse_semver(b)) {
+            (Some(ap), Some(bp)) => ap < bp,
+            _ => false,
+        }
+    }
+
+    /// Returns true if the given installed version is strictly older than the
+    /// version DistroShelf currently ships (`DISTROBOX_VERSION`).
+    pub fn is_bundled_update_available(installed_version: &str) -> bool {
+        version_less_than(installed_version, DISTROBOX_VERSION)
+    }
+
+    pub fn get_bundled_distrobox_path() -> PathBuf {
+        get_stable_bundled_dir().join("distrobox")
+    }
+
+    pub fn get_bundled_distrobox_dir() -> PathBuf {
+        gtk::glib::user_data_dir().join("distroshelf")
+    }
+
+    /// The stable, version-independent directory that holds the bundled distrobox.
+    pub fn get_stable_bundled_dir() -> PathBuf {
+        get_bundled_distrobox_dir().join(BUNDLED_DIR_NAME)
+    }
+
+    /// Path to the file recording the installed bundled distrobox version.
+    pub fn get_version_file_path() -> PathBuf {
+        get_stable_bundled_dir().join(VERSION_FILE)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_semver_basic() {
+            assert_eq!(parse_semver("1.8.2"), Some(vec![1, 8, 2]));
+            assert_eq!(parse_semver("1.0"), Some(vec![1, 0]));
+            assert_eq!(parse_semver("not-a-version"), None);
+            assert_eq!(parse_semver("1.x.3"), None);
+        }
+
+        #[test]
+        fn test_version_less_than() {
+            assert!(version_less_than("1.0.0", "2.0.0"));
+            assert!(version_less_than("1.8.2", "1.8.3"));
+            assert!(!version_less_than("2.0.0", "1.0.0"));
+            assert!(!version_less_than("1.0.0", "1.0.0"));
+            assert!(!version_less_than("not-semver", "1.0.0"));
+            assert!(!version_less_than("1.0.0", "not-semver"));
+        }
+
+        #[test]
+        fn test_is_bundled_update_available() {
+            assert!(is_bundled_update_available("1.0.0"));
+            assert!(!is_bundled_update_available(DISTROBOX_VERSION));
+            assert!(!is_bundled_update_available("999.0.0"));
+        }
+
+        #[test]
+        fn test_path_helpers() {
+            let bundled = get_bundled_distrobox_path();
+            assert!(bundled.ends_with("distrobox-bundled/distrobox"));
+
+            let version_file = get_version_file_path();
+            assert!(version_file.ends_with("distrobox-bundled/VERSION"));
+        }
+    }
+}
+
+use domain::*;
+pub use domain::{
+    DISTROBOX_VERSION, get_bundled_distrobox_dir, get_bundled_distrobox_path,
+    is_bundled_update_available,
+};
+
+/// SHA256 of the tar.gz file from github
 pub const DISTROBOX_SHA256: &str =
     "0c3bc4785ee3be3b89f93abb7cc0a9f60e56989e81319af140a4b60403b18f80";
-
-/// Stable, version-independent directory name for the bundled distrobox.
-///
-/// Upstream `distrobox` resolves the absolute path to its sibling `distrobox-init`
-/// script and bakes that path into the containers it creates. If that path
-/// changed on every DistroShelf update (as it did when each version lived in its
-/// own `distrobox-<VERSION>/` directory), already-created containers would break
-/// the moment the old directory is removed. Keeping the bundled distrobox at a
-/// single stable path ensures containers keep finding `distrobox-init` across
-/// updates.
-const BUNDLED_DIR_NAME: &str = "distrobox-bundled";
-const VERSION_FILE: &str = "VERSION";
-
-pub fn get_bundled_distrobox_path() -> PathBuf {
-    get_stable_bundled_dir().join("distrobox")
-}
-
-pub fn get_bundled_distrobox_dir() -> PathBuf {
-    glib::user_data_dir().join("distroshelf")
-}
-
-/// The stable, version-independent directory that holds the bundled distrobox.
-fn get_stable_bundled_dir() -> PathBuf {
-    get_bundled_distrobox_dir().join(BUNDLED_DIR_NAME)
-}
-
-/// Path to the file recording the installed bundled distrobox version.
-fn get_version_file_path() -> PathBuf {
-    get_stable_bundled_dir().join(VERSION_FILE)
-}
 
 /// Resolves the bundled distrobox binary path, migrating legacy versioned
 /// installs to the stable path on first use.
@@ -55,12 +113,6 @@ pub fn resolve_bundled_distrobox_path(file_system: &FileSystem) -> Option<PathBu
     } else {
         None
     }
-}
-
-/// Returns true if the given installed version is strictly older than the
-/// version DistroShelf currently ships (`DISTROBOX_VERSION`).
-pub fn is_bundled_update_available(installed_version: &str) -> bool {
-    version_less_than(installed_version, DISTROBOX_VERSION)
 }
 
 /// Ensures the stable bundled directory exists. If it doesn't but a legacy
@@ -126,11 +178,7 @@ fn find_latest_legacy_version_dir(file_system: &FileSystem) -> Option<(String, P
             let name_str = name.to_str()?;
             let version_str = name_str.strip_prefix("distrobox-")?;
             let parts = parse_semver(version_str)?;
-            Some((
-                parts,
-                version_str.to_string(),
-                parent.join(name),
-            ))
+            Some((parts, version_str.to_string(), parent.join(name)))
         })
         .collect();
 
@@ -146,17 +194,6 @@ fn find_latest_legacy_version_dir(file_system: &FileSystem) -> Option<(String, P
     valid
         .last()
         .map(|(_, version, path)| (version.clone(), path.clone()))
-}
-
-fn parse_semver(v: &str) -> Option<Vec<u32>> {
-    v.split('.').map(|p| p.parse::<u32>().ok()).collect()
-}
-
-fn version_less_than(a: &str, b: &str) -> bool {
-    match (parse_semver(a), parse_semver(b)) {
-        (Some(ap), Some(bp)) => ap < bp,
-        _ => false,
-    }
 }
 
 fn log(task: &DistroboxTask, msg: &str) {
@@ -269,17 +306,14 @@ pub async fn download_distrobox(
         .rename(&extracted_dir, &stable_dir)
         .context("Failed to move bundled distrobox to stable path")?;
     file_system
-        .write(&stable_dir.join(VERSION_FILE), DISTROBOX_VERSION)
+        .write(&get_version_file_path(), DISTROBOX_VERSION)
         .context("Failed to write version marker")?;
 
     // 5. Make executable (it should be already, but just in case)
     let binary_path = get_bundled_distrobox_path();
     log(
         &task,
-        &format!(
-            "Setting executable permissions on {:?}...",
-            binary_path
-        ),
+        &format!("Setting executable permissions on {:?}...", binary_path),
     );
     file_system
         .set_unix_executable(&binary_path)
@@ -314,14 +348,8 @@ mod tests {
         copy_dir_via_fs(&fs, Path::new("/src"), Path::new("/dst")).unwrap();
 
         assert!(fs.exists(Path::new("/dst")));
-        assert_eq!(
-            fs.read_to_string(Path::new("/dst/a.txt")).unwrap(),
-            "alpha"
-        );
-        assert_eq!(
-            fs.read_to_string(Path::new("/dst/b.txt")).unwrap(),
-            "beta"
-        );
+        assert_eq!(fs.read_to_string(Path::new("/dst/a.txt")).unwrap(), "alpha");
+        assert_eq!(fs.read_to_string(Path::new("/dst/b.txt")).unwrap(), "beta");
     }
 
     #[test]
@@ -330,20 +358,19 @@ mod tests {
         fs.create_dir_all(Path::new("/src/sub/deep")).unwrap();
         fs.write(Path::new("/src/top.txt"), "top").unwrap();
         fs.write(Path::new("/src/sub/mid.txt"), "mid").unwrap();
-        fs.write(Path::new("/src/sub/deep/bottom.txt"), "bottom").unwrap();
+        fs.write(Path::new("/src/sub/deep/bottom.txt"), "bottom")
+            .unwrap();
 
         copy_dir_via_fs(&fs, Path::new("/src"), Path::new("/dst")).unwrap();
 
-        assert_eq!(
-            fs.read_to_string(Path::new("/dst/top.txt")).unwrap(),
-            "top"
-        );
+        assert_eq!(fs.read_to_string(Path::new("/dst/top.txt")).unwrap(), "top");
         assert_eq!(
             fs.read_to_string(Path::new("/dst/sub/mid.txt")).unwrap(),
             "mid"
         );
         assert_eq!(
-            fs.read_to_string(Path::new("/dst/sub/deep/bottom.txt")).unwrap(),
+            fs.read_to_string(Path::new("/dst/sub/deep/bottom.txt"))
+                .unwrap(),
             "bottom"
         );
     }
@@ -363,8 +390,7 @@ mod tests {
     #[test]
     fn test_copy_dir_via_fs_nonexistent_source() {
         let fs = FileSystem::new_null();
-        let err =
-            copy_dir_via_fs(&fs, Path::new("/nonexistent"), Path::new("/dst")).unwrap_err();
+        let err = copy_dir_via_fs(&fs, Path::new("/nonexistent"), Path::new("/dst")).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 

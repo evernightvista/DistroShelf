@@ -20,7 +20,8 @@ use crate::backends::Status;
 use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime};
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
-use crate::distrobox_init_migration::{StaleContainer, current_init_path, migrate_stale_path};
+use crate::distrobox_init_migration::domain::{StaleContainer, current_init_path};
+use crate::distrobox_init_migration::migrate_stale_path;
 use crate::fakers::{Command, CommandRunner, FdMode, FileSystem, Settings};
 use crate::gtk_utils::TypedListStore;
 use crate::models::Container;
@@ -353,9 +354,9 @@ impl RootStore {
         this.imp().bundled_distrobox_version.set_fetcher(move || {
             let this_clone = this_clone.clone();
             async move {
-                let Some(path) =
-                    crate::distrobox_downloader::resolve_bundled_distrobox_path(&this_clone.file_system())
-                else {
+                let Some(path) = crate::distrobox_downloader::resolve_bundled_distrobox_path(
+                    &this_clone.file_system(),
+                ) else {
                     return Ok(None);
                 };
                 let path = path.to_string_lossy().into_owned();

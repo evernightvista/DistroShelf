@@ -32,7 +32,9 @@ use crate::DistroShelfWindow;
 use crate::backends;
 use crate::backends::DistroboxCommandRunnerResponse;
 use crate::config;
-use crate::fakers::{Command, CommandRunner, FileSystem, NullCommandRunnerBuilder, NullFileSystemBuilder, Settings};
+use crate::fakers::{
+    Command, CommandRunner, FileSystem, NullCommandRunnerBuilder, NullFileSystemBuilder, Settings,
+};
 use crate::models::known_distros;
 use crate::root_store::RootStore;
 

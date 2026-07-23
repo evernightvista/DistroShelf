@@ -245,8 +245,7 @@ mod imp {
                 .set_resource_key("create_distrobox_errors");
             self.errors_query
                 .set_refetch_strategy(Query::debounce(Duration::from_millis(500)));
-            self.errors_query
-                .set_priority(glib::Priority::HIGH);
+            self.errors_query.set_priority(glib::Priority::HIGH);
         }
     }
 
@@ -518,41 +517,41 @@ impl CreateDistroboxDialog {
                     self,
                     #[upgrade_or_panic]
                     move || async move {
-                    let imp = this.imp();
-                    let text = imp.name_row.text().to_string();
+                        let imp = this.imp();
+                        let text = imp.name_row.text().to_string();
 
-                    // don't prefill if cloning from a source
-                    if imp.clone_src.borrow().is_some() {
-                        return Ok(None);
-                    }
-
-                    if text.is_empty() {
-                        if imp.selected_image.borrow().is_empty() {
-                            return Ok(Some(gettext("Select an image...")));
+                        // don't prefill if cloning from a source
+                        if imp.clone_src.borrow().is_some() {
+                            return Ok(None);
                         }
-                        return Ok(None);
+
+                        if text.is_empty() {
+                            if imp.selected_image.borrow().is_empty() {
+                                return Ok(Some(gettext("Select an image...")));
+                            }
+                            return Ok(None);
+                        }
+
+                        let candidates = imp
+                            .images_model
+                            .snapshot()
+                            .into_iter()
+                            .filter_map(|item| {
+                                item.downcast::<gtk::StringObject>()
+                                    .ok()
+                                    .map(|sobj| sobj.string().to_string())
+                            })
+                            .collect::<Vec<_>>();
+
+                        let (_filter, suggested_opt) =
+                            crate::dialogs::create_distrobox_helpers::derive_image_prefill(
+                                &text,
+                                Some(&candidates),
+                            );
+
+                        Ok(suggested_opt)
                     }
-
-                    let candidates = imp
-                        .images_model
-                        .snapshot()
-                        .into_iter()
-                        .filter_map(|item| {
-                            item.downcast::<gtk::StringObject>()
-                                .ok()
-                                .map(|sobj| sobj.string().to_string())
-                        })
-                        .collect::<Vec<_>>();
-
-                    let (_filter, suggested_opt) =
-                        crate::dialogs::create_distrobox_helpers::derive_image_prefill(
-                            &text,
-                            Some(&candidates),
-                        );
-
-                    Ok(suggested_opt)
-                }
-            ),
+                ),
             );
             q.set_priority(glib::Priority::HIGH);
             q
@@ -714,16 +713,16 @@ impl CreateDistroboxDialog {
                     self,
                     #[upgrade_or_panic]
                     move || async move {
-                    if let Some(url_text) = this.assemble_url() {
-                        if url_text.is_empty() {
-                            return Err(anyhow::anyhow!("URL is empty"));
+                        if let Some(url_text) = this.assemble_url() {
+                            if url_text.is_empty() {
+                                return Err(anyhow::anyhow!("URL is empty"));
+                            }
+                            this.download_ini_file(&url_text).await
+                        } else {
+                            Err(anyhow::anyhow!("No URL provided"))
                         }
-                        this.download_ini_file(&url_text).await
-                    } else {
-                        Err(anyhow::anyhow!("No URL provided"))
                     }
-                }
-            ),
+                ),
             );
             q.set_priority(glib::Priority::HIGH);
             q

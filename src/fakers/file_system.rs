@@ -163,10 +163,7 @@ impl NullFileSystem {
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         match self.files.borrow_mut().remove(path) {
             Some(_) => Ok(()),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{path:?}"),
-            )),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, format!("{path:?}"))),
         }
     }
 
@@ -221,10 +218,7 @@ impl NullFileSystem {
         let is_dir = dirs.contains(path);
 
         if !is_dir && !has_matching_files {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{path:?}"),
-            ));
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{path:?}")));
         }
 
         let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -500,19 +494,20 @@ mod tests {
     fn test_rename_target_parents_dont_exist() {
         let fs = FileSystem::new_null();
         fs.write(Path::new("/src/file.txt"), "data").unwrap();
-        fs.rename(Path::new("/src"), Path::new("/target/deep/nested")).unwrap();
+        fs.rename(Path::new("/src"), Path::new("/target/deep/nested"))
+            .unwrap();
 
         assert!(!fs.exists(Path::new("/src/file.txt")));
         assert_eq!(
-            fs.read_to_string(Path::new("/target/deep/nested/file.txt")).unwrap(),
+            fs.read_to_string(Path::new("/target/deep/nested/file.txt"))
+                .unwrap(),
             "data"
         );
     }
 
     #[test]
     fn test_set_unix_executable_real() {
-        let dir =
-            std::env::temp_dir().join(format!("distroshelf-sue-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("distroshelf-sue-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("test.sh");
         std::fs::write(&script, "#!/bin/sh\necho hi").unwrap();

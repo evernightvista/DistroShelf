@@ -128,9 +128,7 @@ mod imp {
                     q
                 },
                 flatpak_terminals_query: {
-                    let q = Query::new("flatpak_terminals".into(), || async {
-                        Ok(vec![])
-                    });
+                    let q = Query::new("flatpak_terminals".into(), || async { Ok(vec![]) });
                     q.set_priority(glib::Priority::LOW);
                     q
                 },

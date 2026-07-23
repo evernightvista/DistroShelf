@@ -117,7 +117,12 @@ pub struct QueryInner<T> {
 }
 
 impl<T> QueryInner<T> {
-    pub fn new(key: String, query_fn: Option<QueryFetcher<T>>, timeout: Option<Duration>, priority: glib::Priority) -> Self {
+    pub fn new(
+        key: String,
+        query_fn: Option<QueryFetcher<T>>,
+        timeout: Option<Duration>,
+        priority: glib::Priority,
+    ) -> Self {
         Self {
             key,
             data: None,
@@ -349,7 +354,12 @@ where
     /// Create a [`Query`] that immediately succeeds with the given value.
     /// The query never loads, never errors, and `data()` always returns `Some(value)`.
     pub fn pure(value: T) -> Self {
-        let inner = Rc::new(RefCell::new(QueryInner::new("pure".into(), None, None, glib::Priority::DEFAULT)));
+        let inner = Rc::new(RefCell::new(QueryInner::new(
+            "pure".into(),
+            None,
+            None,
+            glib::Priority::DEFAULT,
+        )));
         let query = Self { inner };
         query.supply(value);
         query
@@ -359,7 +369,12 @@ where
     /// It never emits a value on its own — useful as a terminal for combinators
     /// like `once()` that need to suppress further updates.
     pub fn pending() -> Self {
-        let inner = Rc::new(RefCell::new(QueryInner::new("pending".into(), None, None, glib::Priority::DEFAULT)));
+        let inner = Rc::new(RefCell::new(QueryInner::new(
+            "pending".into(),
+            None,
+            None,
+            glib::Priority::DEFAULT,
+        )));
         Self { inner }
     }
 
@@ -649,10 +664,12 @@ where
         let inner = self.inner.clone();
         let priority = { self.inner.borrow().priority };
 
-        let handle = glib::MainContext::ref_thread_default()
-            .spawn_local_with_priority(priority, async move {
+        let handle = glib::MainContext::ref_thread_default().spawn_local_with_priority(
+            priority,
+            async move {
                 Self::execute_fetch(&inner, generation).await;
-            });
+            },
+        );
 
         self.inner.borrow_mut().fetch_task_handle = Some(handle);
     }
@@ -740,15 +757,17 @@ where
             let inner = self.inner.clone();
             let generation = inner.borrow().fetch_generation;
             let priority = { self.inner.borrow().priority };
-            let handle = glib::MainContext::ref_thread_default()
-                .spawn_local_with_priority(priority, async move {
+            let handle = glib::MainContext::ref_thread_default().spawn_local_with_priority(
+                priority,
+                async move {
                     glib::timeout_future(delay).await;
                     if inner.borrow().fetch_generation != generation {
                         return;
                     }
                     inner.borrow_mut().last_fetch_started_at = Some(SystemTime::now());
                     Self::execute_fetch(&inner, generation).await;
-                });
+                },
+            );
 
             if let Some(old_handle) = self.inner.borrow_mut().fetch_task_handle.take() {
                 old_handle.abort();
@@ -1027,7 +1046,8 @@ mod tests {
 
     /// Build a `QueryInner` with `last_success_at` set, for staleness/age tests.
     fn inner_with_success_at(last_success_at: Option<SystemTime>) -> QueryInner<String> {
-        let mut inner = QueryInner::<String>::new("test".into(), None, None, glib::Priority::DEFAULT);
+        let mut inner =
+            QueryInner::<String>::new("test".into(), None, None, glib::Priority::DEFAULT);
         inner.last_success_at = last_success_at;
         inner
     }

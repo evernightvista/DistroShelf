@@ -1,102 +1,26 @@
 use crate::fakers::{Child, Command, CommandRunner, FdMode, NullCommandRunnerBuilder};
 
-use serde::{Deserialize, Deserializer};
 use std::{
     cell::LazyCell,
     collections::{BTreeMap, HashMap},
-    ffi::OsString,
     io,
-    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     process::Output,
     rc::Rc,
-    str::FromStr,
 };
 use tracing::{debug, error, info, warn};
 
-use crate::backends::desktop_file::*;
+use super::domain::{
+    ContainerInfo, CreateArgs, ExportableApp, ExportableBinary, InvalidValue, Status,
+    assemble_cmd as domain_assemble_cmd, assemble_exportable_apps,
+    assemble_from_url_cmd as domain_assemble_from_url_cmd, create_cmd as domain_create_cmd,
+    decode_desktop_files, enter_cmd as domain_enter_cmd, extract_binary_path_from_wrapper_content,
+    parse_exported_binaries_line, to_hex,
+};
 use crate::backends::distrobox::command::{CmdFactory, default_cmd_factory};
 
 const POSIX_FIND_AND_CONCAT_DESKTOP_FILES: &str =
     include_str!("POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh");
-
-/// Encode a string as hex (matching the shell script's base16 function)
-fn to_hex(s: &str) -> String {
-    s.bytes().map(|b| format!("{:02x}", b)).collect()
-}
-
-#[derive(Deserialize, Debug)]
-struct DesktopFiles {
-    #[serde(deserialize_with = "DesktopFiles::deserialize_path")]
-    home_dir: PathBuf,
-    #[serde(deserialize_with = "DesktopFiles::deserialize_desktop_files")]
-    system: BTreeMap<PathBuf, String>,
-    #[serde(deserialize_with = "DesktopFiles::deserialize_desktop_files")]
-    user: BTreeMap<PathBuf, String>,
-}
-
-impl DesktopFiles {
-    fn decode_hex<E: serde::de::Error>(hex_str: &str) -> Result<Vec<u8>, E> {
-        if !hex_str.len().is_multiple_of(2) {
-            return Err(E::invalid_length(
-                hex_str.len(),
-                &"hex string to have an even length",
-            ));
-        }
-
-        (0..hex_str.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex_str[i..=i + 1], 16))
-            .collect::<Result<_, _>>()
-            .map_err(|e| {
-                E::custom(format_args!(
-                    "hex string contains non hex characters: {e:?}"
-                ))
-            })
-    }
-
-    fn decode_utf8_from_hex<E: serde::de::Error>(hex_str: &str) -> Result<String, E> {
-        String::from_utf8(Self::decode_hex(hex_str)?).map_err(|e| {
-            E::custom(format_args!(
-                "decoded hex string does not represent valid UTF-8: {e:?}"
-            ))
-        })
-    }
-
-    fn decode_path_from_hex<E: serde::de::Error>(hex_str: &str) -> Result<PathBuf, E> {
-        Ok(PathBuf::from(OsString::from_vec(Self::decode_hex(
-            hex_str,
-        )?)))
-    }
-
-    fn deserialize_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-        Self::decode_path_from_hex(&String::deserialize(deserializer)?)
-    }
-
-    fn deserialize_desktop_files<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<BTreeMap<PathBuf, String>, D::Error> {
-        BTreeMap::<String, String>::deserialize(deserializer)?
-            .into_iter()
-            .map(|(path, content)| {
-                Ok((
-                    Self::decode_path_from_hex(&path)?,
-                    Self::decode_utf8_from_hex(&content)?,
-                ))
-            })
-            .collect()
-    }
-
-    fn into_map(self, host_home: Option<PathBuf>) -> BTreeMap<PathBuf, String> {
-        let mut desktop_files = self.system;
-        // Only include user desktop files if the container's home directory is different from the host's
-        // This avoids showing duplicate entries when the container shares the host's home directory
-        if host_home.as_ref() != Some(&self.home_dir) {
-            desktop_files.extend(self.user)
-        }
-        desktop_files
-    }
-}
 
 #[derive(Clone)]
 pub struct Distrobox {
@@ -105,238 +29,6 @@ pub struct Distrobox {
 }
 
 type CommandResponse = (Command, Rc<dyn Fn() -> io::Result<String>>);
-
-#[derive(Clone, Debug, PartialEq, Hash)]
-pub enum Status {
-    Up(String),
-    Created(String),
-    Exited(String),
-    // I don't want the app to crash if the parsing fails because distrobox changed with an update.
-    // We will just disable some features, but still show the status value.
-    Other(String),
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Self::Other("".into())
-    }
-}
-
-impl std::fmt::Display for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Status::Up(s) => write!(f, "Up {}", s),
-            Status::Created(s) => write!(f, "Created {}", s),
-            Status::Exited(s) => write!(f, "Exited {}", s),
-            Status::Other(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-impl Status {
-    fn from_str(s: &str) -> Self {
-        if let Some(rest) = s.strip_prefix("Up") {
-            Status::Up(rest.trim().to_string())
-        } else if let Some(rest) = s.strip_prefix("Exited") {
-            Status::Exited(rest.trim().to_string())
-        } else if let Some(rest) = s.strip_prefix("Created") {
-            Status::Created(rest.trim().to_string())
-        } else {
-            Status::Other(s.to_string())
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Hash, Clone)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub status: Status,
-    pub image: String,
-    pub created_at: Option<String>,
-    pub last_used_at: Option<String>,
-}
-
-impl ContainerInfo {
-    fn field_missing_error(text: &str, line: &str) -> Error {
-        Error::ParseOutput(format!("{text} missing in line: {}", line))
-    }
-}
-
-impl FromStr for ContainerInfo {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('|').collect();
-        if parts.len() != 4 {
-            return Err(Error::ParseOutput(format!(
-                "Invalid field count (expected 4, got {}) in line: {}",
-                parts.len(),
-                s
-            )));
-        }
-
-        let id = parts[0].trim();
-        let name = parts[1].trim();
-        let status = parts[2].trim();
-        let image = parts[3].trim();
-
-        // Check for empty fields
-        if id.is_empty() {
-            return Err(ContainerInfo::field_missing_error("id", s));
-        }
-        if name.is_empty() {
-            return Err(ContainerInfo::field_missing_error("name", s));
-        }
-        if status.is_empty() {
-            return Err(ContainerInfo::field_missing_error("status", s));
-        }
-        if image.is_empty() {
-            return Err(ContainerInfo::field_missing_error("image", s));
-        }
-
-        Ok(ContainerInfo {
-            id: id.to_string(),
-            name: name.to_string(),
-            status: Status::from_str(status),
-            image: image.to_string(),
-            created_at: None,
-            last_used_at: None,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExportableApp {
-    pub entry: DesktopEntry,
-    pub desktop_file_path: String,
-    pub exported: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExportableBinary {
-    pub name: String,
-    pub source_path: String,
-    pub exported_path: String,
-}
-
-#[derive(Default, Debug, PartialEq, Clone)]
-pub struct CreateArgName(String);
-
-impl std::fmt::Display for CreateArgName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl CreateArgName {
-    pub fn new(value: &str) -> Result<Self, InvalidValue> {
-        let re = regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$").unwrap();
-        if re.is_match(value) {
-            Ok(CreateArgName(value.to_string()))
-        } else {
-            Err(InvalidValue {
-                hint: "Must respect the format [a-zA-Z0-9][a-zA-Z0-9_.-]*".into(),
-            })
-        }
-    }
-}
-
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CreateArgsImage(String);
-
-impl CreateArgsImage {
-    pub fn new(value: &str) -> Result<Self, InvalidValue> {
-        if value.trim().is_empty() {
-            Err(InvalidValue {
-                hint: "Image cannot be empty".into(),
-            })
-        } else {
-            Ok(CreateArgsImage(value.to_string()))
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for CreateArgsImage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Default, Debug, PartialEq, Clone)]
-pub struct CreateArgs {
-    pub init: bool,
-    pub nvidia: bool,
-    pub root: bool,
-    pub no_entry: bool,
-    pub hostname: Option<String>,
-    pub home_path: Option<String>,
-    pub image: Option<CreateArgsImage>,
-    pub name: CreateArgName,
-    pub volumes: Vec<Volume>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum VolumeMode {
-    ReadOnly,
-}
-
-impl std::fmt::Display for VolumeMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VolumeMode::ReadOnly => write!(f, "ro"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Volume {
-    pub host_path: String,
-    pub container_path: String,
-    pub mode: Option<VolumeMode>,
-}
-
-impl FromStr for Volume {
-    type Err = InvalidValue;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split(':').collect();
-        match parts.as_slice() {
-            [host] => Ok(Volume {
-                host_path: host.to_string(),
-                container_path: host.to_string(),
-                mode: None,
-            }),
-            [host, target] => Ok(Volume {
-                host_path: host.to_string(),
-                container_path: target.to_string(),
-                mode: None,
-            }),
-            [host, target, "ro"] => Ok(Volume {
-                host_path: host.to_string(),
-                container_path: target.to_string(),
-                mode: Some(VolumeMode::ReadOnly),
-            }),
-            _ => Err(InvalidValue {
-                hint: format!("Invalid volume descriptor: {}", s),
-            }),
-        }
-    }
-}
-
-impl std::fmt::Display for Volume {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host_path, self.container_path)?;
-        if let Some(mode) = &self.mode {
-            write!(f, ":{}", mode)?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -361,12 +53,6 @@ pub enum Error {
 
     #[error("failed to resolve host path: {0}. getfattr may not be installed on the host")]
     ResolveHostPath(String),
-}
-
-#[derive(thiserror::Error, Debug)]
-#[error("invalid value: {hint}")]
-pub struct InvalidValue {
-    pub hint: String,
 }
 
 /// Represents mock responses for the NullCommandRunner used in previews and testing.
@@ -758,14 +444,13 @@ impl Distrobox {
             "-c",
             POSIX_FIND_AND_CONCAT_DESKTOP_FILES,
         ]);
-        let desktop_files: DesktopFiles = toml::from_str(&self.cmd_output_string(cmd).await?)
-            .map_err(|e| Error::ParseOutput(format!("{e:?}")))?;
-        debug!(desktop_files = format_args!("{desktop_files:#?}"));
-
+        let toml_str = self.cmd_output_string(cmd).await?;
         let host_home_opt = host_env.get("HOME").cloned().map(PathBuf::from);
+        let desktop_files = decode_desktop_files(&toml_str, host_home_opt)
+            .map_err(|e| Error::ParseOutput(e.to_string()))?;
+        debug!(desktop_files = ?desktop_files);
 
         Ok(desktop_files
-            .into_map(host_home_opt)
             .into_iter()
             .map(|(path, content)| (path.to_string_lossy().into_owned(), content))
             .collect::<Vec<_>>())
@@ -784,36 +469,8 @@ impl Distrobox {
         debug!(desktop_files=?files);
         let exported = self.get_exported_desktop_files(&host_env).await?;
         debug!(exported_files=?exported);
-        let res: Vec<ExportableApp> = files
-            .into_iter()
-            .flat_map(|(path, content)| -> Option<ExportableApp> {
-                let entry = match parse_desktop_file(&content) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse desktop file {}: {}", path, e);
-                        return None;
-                    }
-                };
-                let file_name = Path::new(&path)
-                    .file_name()
-                    .map(|x| x.to_str())
-                    .unwrap_or_default()
-                    .unwrap_or_default();
 
-                let exported_as = format!("{box_name}-{file_name}");
-                let is_exported = exported.contains(&exported_as);
-                if is_exported {
-                    debug!(found_exported = exported_as);
-                }
-                Some(ExportableApp {
-                    desktop_file_path: path,
-                    entry,
-                    exported: is_exported,
-                })
-            })
-            .collect();
-
-        Ok(res)
+        Ok(assemble_exportable_apps(files, box_name, exported))
     }
 
     /// Lists only the binaries that have already been exported from the container.
@@ -835,53 +492,32 @@ impl Distrobox {
 
         let mut binaries = Vec::new();
         for line in output.lines() {
-            if line.is_empty() || !line.contains('|') {
-                continue;
-            }
+            if let Some((source_path, exported_path)) = parse_exported_binaries_line(line) {
+                let source_path = if source_path.is_empty() {
+                    self.extract_binary_path_from_wrapper(&exported_path)
+                        .await
+                        .unwrap_or_else(|| exported_path.clone())
+                } else {
+                    source_path
+                };
 
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() >= 2 {
-                let source_path = parts[0].trim().to_string();
-                // For some reason distrobox formats the source path between single quotes, so we need to remove those
-                let source_path = source_path.trim_matches('\'').to_string();
+                let name = Path::new(&source_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        Path::new(&exported_path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                    })
+                    .unwrap_or(&source_path)
+                    .to_string();
 
-                let exported_path_str = parts[1].trim();
-
-                // Only include binaries that have a non-empty exported path. It should always be the case, but BoxBuddy defensively checks it.
-                // In this case we try to follow BoxBuddy's behavior to keep consistency for users.
-                if !exported_path_str.is_empty() {
-                    let exported_path = exported_path_str.to_string();
-
-                    // If source_path is empty (due to a bug in distrobox's --list-binaries when
-                    // sudo_prefix is not set, common in Arch Linux containers), try to extract
-                    // the actual binary path from the exported wrapper script.
-                    let source_path = if source_path.is_empty() {
-                        self.extract_binary_path_from_wrapper(&exported_path)
-                            .await
-                            .unwrap_or_else(|| exported_path.clone())
-                    } else {
-                        source_path
-                    };
-
-                    // Extract binary name from source path, falling back to exported_path if source_path is still problematic.
-                    let name = Path::new(&source_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| {
-                            Path::new(&exported_path)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                        })
-                        .unwrap_or(&source_path)
-                        .to_string();
-
-                    binaries.push(ExportableBinary {
-                        name,
-                        source_path,
-                        exported_path,
-                    });
-                }
+                binaries.push(ExportableBinary {
+                    name,
+                    source_path,
+                    exported_path,
+                });
             }
         }
 
@@ -890,31 +526,10 @@ impl Distrobox {
 
     /// Extracts the original binary path from a distrobox exported wrapper script.
     /// The wrapper script contains lines like: exec '/usr/bin/binary' "$@"
-    ///
-    /// Uses the shared `extract_quoted_string` utility from desktop_file module for
-    /// consistent string parsing across the codebase.
     async fn extract_binary_path_from_wrapper(&self, wrapper_path: &str) -> Option<String> {
-        // Read the wrapper script content
         let cmd = Command::new_with_args("cat", [wrapper_path]);
         let output = self.cmd_output_string(cmd).await.ok()?;
-
-        // Look for the pattern: exec ... '/path/to/binary' or exec '/path/to/binary'
-        // The binary path is typically in single quotes in the else branch
-        for line in output.lines() {
-            let trimmed = line.trim();
-            // Look for lines with exec that contain a quoted path
-            if trimmed.starts_with("exec") {
-                // Reuse the shared quoted string extraction logic from desktop_file module
-                if let Some(path) = extract_quoted_string(trimmed, '\'') {
-                    // Validate it looks like an absolute path to the actual binary
-                    // (not a distrobox wrapper command)
-                    if path.starts_with('/') && !path.contains("distrobox") {
-                        return Some(path);
-                    }
-                }
-            }
-        }
-        None
+        extract_binary_path_from_wrapper_content(&output)
     }
 
     pub fn launch_app(
@@ -1027,11 +642,7 @@ impl Distrobox {
                 hint: "File path cannot be empty".into(),
             }));
         }
-        let mut cmd = self.dbcmd();
-        cmd.arg("assemble")
-            .arg("create")
-            .arg("--file")
-            .arg(file_path);
+        let cmd = domain_assemble_cmd(file_path, self.dbcmd());
         self.cmd_spawn(cmd)
     }
 
@@ -1041,43 +652,11 @@ impl Distrobox {
                 hint: "URL cannot be empty".into(),
             }));
         }
-        let mut cmd = self.dbcmd();
-        cmd.arg("assemble").arg("create").arg("--file").arg(url);
+        let cmd = domain_assemble_from_url_cmd(url, self.dbcmd());
         self.cmd_spawn(cmd)
     }
     fn create_cmd(&self, args: CreateArgs) -> Command {
-        let mut cmd = self.dbcmd();
-        cmd.arg("create").arg("--yes");
-        if let Some(image) = args.image {
-            cmd.arg("--image").arg(image.as_str());
-        }
-        if !args.name.0.is_empty() {
-            cmd.arg("--name").arg(args.name.0);
-        }
-        if let Some(hostname) = args.hostname {
-            cmd.arg("--hostname").arg(hostname);
-        }
-        if args.init {
-            cmd.arg("--init")
-                .arg("--additional-packages")
-                .arg("systemd");
-        }
-        if args.root {
-            cmd.arg("--root");
-        }
-        if args.no_entry {
-            cmd.arg("--no-entry");
-        }
-        if args.nvidia {
-            cmd.arg("--nvidia");
-        }
-        if let Some(home_path) = args.home_path {
-            cmd.arg("--home").arg(home_path);
-        }
-        for volume in args.volumes {
-            cmd.arg("--volume").arg(volume.to_string());
-        }
-        cmd
+        domain_create_cmd(&args, self.dbcmd())
     }
     // create
     pub async fn create(&self, args: CreateArgs) -> Result<Box<dyn Child + Send>, Error> {
@@ -1103,9 +682,7 @@ impl Distrobox {
     }
     // enter
     pub fn enter_cmd(&self, name: &str) -> Command {
-        let mut cmd = self.dbcmd();
-        cmd.arg("enter").arg(name).arg("--no-workdir");
-        cmd
+        domain_enter_cmd(name, self.dbcmd())
     }
     // clone from an existing container using create args to customize the clone
     pub async fn clone_from(
@@ -1139,7 +716,7 @@ impl Distrobox {
                 }
                 Err(e) => {
                     error!(error = %e, line = %line, "Failed to parse container info");
-                    return Err(e);
+                    return Err(Error::ParseOutput(e.to_string()));
                 }
             }
         }
@@ -1211,7 +788,9 @@ impl Default for Distrobox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::distrobox::{ContainerInfo, CreateArgsImage, Status, Volume};
     use smol::block_on;
+    use std::str::FromStr;
 
     /// Helper to generate TOML output matching the shell script format
     fn make_desktop_files_toml(
@@ -1398,6 +977,7 @@ Categories=Utility;Security;";
         assert!(apps[0].exported);
         Ok(())
     }
+
     #[test]
     fn create() -> Result<(), Error> {
         let _ = tracing_subscriber::fmt().with_test_writer().try_init();
@@ -1492,11 +1072,9 @@ Categories=Utility;Security;";
 
     #[test]
     fn stub_exported_apps_generates_valid_toml() {
-        // Verify that new_common_exported_apps generates valid TOML that can be parsed
         let exported_apps = DistroboxCommandRunnerResponse::new_common_exported_apps();
         let commands = exported_apps.into_commands();
 
-        // Find the command that should contain TOML output (distrobox enter ... sh -c ...)
         let toml_command = commands
             .iter()
             .find(|(cmd, _)| {
@@ -1510,25 +1088,15 @@ Categories=Utility;Security;";
 
         let toml_output = toml_command.1().expect("Should generate output");
 
-        // Verify the TOML is parseable
-        let desktop_files: DesktopFiles =
-            toml::from_str(&toml_output).expect("Generated TOML should be valid and parseable");
+        let desktop_files = decode_desktop_files(&toml_output, None)
+            .expect("Generated TOML should be valid and parseable");
 
-        // Verify home_dir is set
-        assert_eq!(
-            desktop_files.home_dir.to_string_lossy(),
-            "/home/me",
-            "home_dir should be /home/me"
-        );
-
-        // Verify we have system files (the mock apps should be in system)
         assert!(
-            !desktop_files.system.is_empty(),
+            !desktop_files.is_empty(),
             "Should have system desktop files"
         );
 
-        // Verify all system files are valid desktop entries
-        for (path, content) in &desktop_files.system {
+        for (path, content) in &desktop_files {
             assert!(
                 path.to_string_lossy().ends_with(".desktop"),
                 "Path should end with .desktop: {:?}",
@@ -1543,146 +1111,6 @@ Categories=Utility;Security;";
                 "Content should have a Name field"
             );
         }
-    }
-
-    #[test]
-    fn status_parsing() {
-        // Test "Up" status with details
-        assert_eq!(
-            Status::from_str("Up 2 hours"),
-            Status::Up("2 hours".to_string())
-        );
-        assert_eq!(
-            Status::from_str("Up (Paused)"),
-            Status::Up("(Paused)".to_string())
-        );
-
-        // Test "Created" status
-        assert_eq!(
-            Status::from_str("Created 5 minutes ago"),
-            Status::Created("5 minutes ago".to_string())
-        );
-
-        // Test "Exited" status
-        assert_eq!(
-            Status::from_str("Exited (0) 10 seconds ago"),
-            Status::Exited("(0) 10 seconds ago".to_string())
-        );
-
-        // Test unknown status falls back to Other
-        assert_eq!(
-            Status::from_str("Unknown status"),
-            Status::Other("Unknown status".to_string())
-        );
-
-        // Test empty string
-        assert_eq!(Status::from_str(""), Status::Other("".to_string()));
-    }
-
-    #[test]
-    fn status_display() {
-        assert_eq!(Status::Up("2 hours".to_string()).to_string(), "Up 2 hours");
-        assert_eq!(
-            Status::Created("5 minutes ago".to_string()).to_string(),
-            "Created 5 minutes ago"
-        );
-        assert_eq!(
-            Status::Exited("(0) 10 seconds ago".to_string()).to_string(),
-            "Exited (0) 10 seconds ago"
-        );
-        assert_eq!(Status::Other("Unknown".to_string()).to_string(), "Unknown");
-    }
-
-    #[test]
-    fn volume_parsing() -> Result<(), Error> {
-        // Test single path (host only, container path same as host)
-        let vol = Volume::from_str("/data")?;
-        assert_eq!(vol.host_path, "/data");
-        assert_eq!(vol.container_path, "/data");
-        assert_eq!(vol.mode, None);
-
-        // Test host:container path
-        let vol = Volume::from_str("/host/path:/container/path")?;
-        assert_eq!(vol.host_path, "/host/path");
-        assert_eq!(vol.container_path, "/container/path");
-        assert_eq!(vol.mode, None);
-
-        // Test host:container:ro (read-only)
-        let vol = Volume::from_str("/data:/data:ro")?;
-        assert_eq!(vol.host_path, "/data");
-        assert_eq!(vol.container_path, "/data");
-        assert_eq!(vol.mode, Some(VolumeMode::ReadOnly));
-
-        // Test invalid volume descriptor
-        let result = Volume::from_str("/a:/b:/c:/d");
-        assert!(result.is_err());
-
-        Ok(())
-    }
-
-    #[test]
-    fn volume_display() {
-        let vol = Volume {
-            host_path: "/host".to_string(),
-            container_path: "/container".to_string(),
-            mode: None,
-        };
-        assert_eq!(vol.to_string(), "/host:/container");
-
-        let vol_ro = Volume {
-            host_path: "/host".to_string(),
-            container_path: "/container".to_string(),
-            mode: Some(VolumeMode::ReadOnly),
-        };
-        assert_eq!(vol_ro.to_string(), "/host:/container:ro");
-    }
-
-    #[test]
-    fn container_info_parsing() -> Result<(), Error> {
-        // Test valid container line with "Up" status
-        let line = "abc123 | my-container | Up 5 hours | docker.io/library/ubuntu:latest";
-        let info = ContainerInfo::from_str(line)?;
-        assert_eq!(info.id, "abc123");
-        assert_eq!(info.name, "my-container");
-        assert_eq!(info.status, Status::Up("5 hours".to_string()));
-        assert_eq!(info.image, "docker.io/library/ubuntu:latest");
-
-        // Test container with "Created" status
-        let line =
-            "def456 | fedora | Created 2 minutes ago | ghcr.io/ublue-os/fedora-toolbox:latest";
-        let info = ContainerInfo::from_str(line)?;
-        assert_eq!(info.id, "def456");
-        assert_eq!(info.name, "fedora");
-        assert_eq!(info.status, Status::Created("2 minutes ago".to_string()));
-        assert_eq!(info.image, "ghcr.io/ublue-os/fedora-toolbox:latest");
-
-        // Test container with "Exited" status
-        let line = "789ghi | arch | Exited (0) 1 day ago | docker.io/library/archlinux:latest";
-        let info = ContainerInfo::from_str(line)?;
-        assert_eq!(info.id, "789ghi");
-        assert_eq!(info.name, "arch");
-        assert_eq!(info.status, Status::Exited("(0) 1 day ago".to_string()));
-        assert_eq!(info.image, "docker.io/library/archlinux:latest");
-
-        Ok(())
-    }
-
-    #[test]
-    fn container_info_parsing_errors() {
-        // Too few fields
-        let result = ContainerInfo::from_str("abc123 | my-container | Up");
-        assert!(result.is_err());
-
-        // Too many fields shouldn't happen in normal distrobox output, but test behavior
-        let result = ContainerInfo::from_str("a | b | c | d | e");
-        assert!(result.is_err());
-
-        // Empty fields should fail
-        let result = ContainerInfo::from_str(" | my-container | Up | image");
-        assert!(result.is_err());
-
-        let result = ContainerInfo::from_str("abc123 |  | Up | image");
-        assert!(result.is_err());
     }
 
     #[test]

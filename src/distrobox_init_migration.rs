@@ -34,6 +34,123 @@ use std::path::{Path, PathBuf};
 use crate::backends::container_runtime::ContainerRuntime;
 use crate::fakers::{Command, CommandRunner};
 
+pub(crate) mod domain {
+    use std::path::{Path, PathBuf};
+
+    /// A container whose `distrobox-init` bind-mount source no longer resolves.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct StaleContainer {
+        pub name: String,
+        /// The host path the container expects `distrobox-init` at.
+        pub stale_init_path: PathBuf,
+        /// Whether the container was running when the check ran. Running
+        /// containers are reported but not migrated (see the docs: creating the
+        /// symlink while the container is starting is racy).
+        pub running: bool,
+    }
+
+    pub enum StaleDecision {
+        Stale,
+        Current,
+        NeedsReprovisioning,
+    }
+
+    pub fn classify_stale(
+        source: &Path,
+        current_init: &Path,
+        source_exists: bool,
+    ) -> StaleDecision {
+        if source == current_init {
+            if !source_exists {
+                return StaleDecision::NeedsReprovisioning;
+            }
+            return StaleDecision::Current;
+        }
+        if !source_exists {
+            return StaleDecision::Stale;
+        }
+        StaleDecision::Current
+    }
+
+    /// Resolves the `distrobox-init` location for the given `distrobox`
+    /// executable path. Upstream distrobox provisions its scripts in the
+    /// directory of the executable (`hostDir()`), so `distrobox-init` is always a
+    /// sibling of the `distrobox` binary.
+    ///
+    /// Returns `None` for bare program names (e.g. `"distrobox"` resolved via
+    /// `PATH`) because they carry no directory information.
+    pub fn current_init_path(distrobox_exe_path: &str) -> Option<PathBuf> {
+        let dir = Path::new(distrobox_exe_path).parent()?;
+        if dir.as_os_str().is_empty() {
+            return None;
+        }
+        Some(dir.join("distrobox-init"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        const CURRENT_INIT: &str =
+            "/home/user/.local/share/distroshelf/distrobox-bundled/distrobox-init";
+
+        #[test]
+        fn test_current_init_path() {
+            assert_eq!(
+                current_init_path(
+                    "/home/user/.local/share/distroshelf/distrobox-bundled/distrobox"
+                ),
+                Some(PathBuf::from(CURRENT_INIT))
+            );
+            assert_eq!(
+                current_init_path("/usr/bin/distrobox"),
+                Some(PathBuf::from("/usr/bin/distrobox-init"))
+            );
+            assert_eq!(current_init_path("distrobox"), None);
+            assert_eq!(current_init_path(""), None);
+        }
+
+        #[test]
+        fn test_classify_stale_current() {
+            let current = Path::new("/current/distrobox-init");
+            assert!(matches!(
+                classify_stale(current, current, true),
+                StaleDecision::Current
+            ));
+        }
+
+        #[test]
+        fn test_classify_stale_stale() {
+            let current = Path::new("/current/distrobox-init");
+            let stale = Path::new("/old/distrobox-init");
+            assert!(matches!(
+                classify_stale(stale, current, false),
+                StaleDecision::Stale
+            ));
+        }
+
+        #[test]
+        fn test_classify_stale_needs_reprovisioning() {
+            let current = Path::new("/current/distrobox-init");
+            assert!(matches!(
+                classify_stale(current, current, false),
+                StaleDecision::NeedsReprovisioning
+            ));
+        }
+
+        #[test]
+        fn test_classify_stale_different_path_exists() {
+            let current = Path::new("/current/distrobox-init");
+            let other = Path::new("/other/distrobox-init");
+            assert!(matches!(
+                classify_stale(other, current, true),
+                StaleDecision::Current
+            ));
+        }
+    }
+}
+
 async fn path_exists(runner: &CommandRunner, path: &Path) -> bool {
     let mut cmd = Command::new("test");
     cmd.arg("-e");
@@ -61,33 +178,6 @@ const ENTRYPOINT_SCRIPT: &str = "distrobox-init";
 /// the bundled install's `VERSION` marker.
 const DISTROBOX_SCRIPT_PREFIX: &str = "distrobox-";
 
-/// A container whose `distrobox-init` bind-mount source no longer resolves.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StaleContainer {
-    pub name: String,
-    /// The host path the container expects `distrobox-init` at.
-    pub stale_init_path: PathBuf,
-    /// Whether the container was running when the check ran. Running
-    /// containers are reported but not migrated (see the docs: creating the
-    /// symlink while the container is starting is racy).
-    pub running: bool,
-}
-
-/// Resolves the `distrobox-init` location for the given `distrobox`
-/// executable path. Upstream distrobox provisions its scripts in the
-/// directory of the executable (`hostDir()`), so `distrobox-init` is always a
-/// sibling of the `distrobox` binary.
-///
-/// Returns `None` for bare program names (e.g. `"distrobox"` resolved via
-/// `PATH`) because they carry no directory information.
-pub fn current_init_path(distrobox_exe_path: &str) -> Option<PathBuf> {
-    let dir = Path::new(distrobox_exe_path).parent()?;
-    if dir.as_os_str().is_empty() {
-        return None;
-    }
-    Some(dir.join("distrobox-init"))
-}
-
 /// Inspects the given containers (`(name, running)` pairs) and returns those
 /// whose entrypoint bind-mount source differs from `current_init` *and* no
 /// longer exists on the host.
@@ -101,7 +191,7 @@ pub async fn find_stale_containers(
     runtime: &ContainerRuntime,
     containers: &[(String, bool)],
     current_init: &Path,
-) -> Vec<StaleContainer> {
+) -> Vec<domain::StaleContainer> {
     let mut stale = Vec::new();
     for (name, running) in containers {
         let source = match runtime.entrypoint_mount_source(runner, name).await {
@@ -123,29 +213,24 @@ pub async fn find_stale_containers(
             }
         };
 
-        if source == current_init {
-            // Paths match: not a migration problem. A missing file here means
-            // the init script is absent from its canonical location, which
-            // requires re-provisioning (re-downloading the bundle), not a
-            // symlink pointing at itself.
-            if !path_exists(runner, &source).await {
+        let source_exists = path_exists(runner, &source).await;
+        match domain::classify_stale(&source, current_init, source_exists) {
+            domain::StaleDecision::NeedsReprovisioning => {
                 tracing::warn!(
                     path = %source.display(),
                     "distrobox-init missing at its canonical location; the bundle needs re-provisioning"
                 );
+                continue;
             }
-            continue;
+            domain::StaleDecision::Stale => {
+                stale.push(domain::StaleContainer {
+                    name: name.clone(),
+                    stale_init_path: source,
+                    running: *running,
+                });
+            }
+            domain::StaleDecision::Current => continue,
         }
-
-        if path_exists(runner, &source).await {
-            continue;
-        }
-
-        stale.push(StaleContainer {
-            name: name.clone(),
-            stale_init_path: source,
-            running: *running,
-        });
     }
     stale
 }
@@ -299,6 +384,7 @@ pub async fn migrate_stale_path(
 
 #[cfg(test)]
 mod tests {
+    use super::domain::*;
     use super::*;
     use crate::fakers::{CommandRunnerEvent, NullCommandRunnerBuilder};
     use smol::block_on;
@@ -327,20 +413,6 @@ mod tests {
             r#"[{{"Type":"bind","Source":"{}","Destination":"/usr/bin/entrypoint","Mode":"ro","RW":false,"Propagation":"rprivate"}}]"#,
             source
         )
-    }
-
-    #[test]
-    fn test_current_init_path() {
-        assert_eq!(
-            current_init_path("/home/user/.local/share/distroshelf/distrobox-bundled/distrobox"),
-            Some(PathBuf::from(CURRENT_INIT))
-        );
-        assert_eq!(
-            current_init_path("/usr/bin/distrobox"),
-            Some(PathBuf::from("/usr/bin/distrobox-init"))
-        );
-        assert_eq!(current_init_path("distrobox"), None);
-        assert_eq!(current_init_path(""), None);
     }
 
     #[test]
