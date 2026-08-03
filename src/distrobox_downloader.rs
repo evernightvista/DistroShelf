@@ -5,8 +5,7 @@ use crate::models::DistroboxTask;
 use crate::models::RootStore;
 use anyhow::{Context, anyhow};
 use gtk::glib;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(crate) mod domain {
     use std::path::PathBuf;
@@ -101,66 +100,27 @@ pub use domain::{
 pub const DISTROBOX_SHA256: &str =
     "0c3bc4785ee3be3b89f93abb7cc0a9f60e56989e81319af140a4b60403b18f80";
 
-/// Resolves the bundled distrobox binary path, migrating legacy versioned
-/// installs to the stable path on first use.
+/// Resolves the bundled distrobox binary path.
+///
+/// Resolution runs purely locally (no network): the stable
+/// `distrobox-bundled/distrobox` path always wins when present; otherwise the
+/// newest legacy versioned install (`distrobox-<VERSION>/distrobox`) is used
+/// as a fallback. Legacy directories are never deleted or migrated by the
+/// app, so a legacy-only install keeps working offline. This function only
+/// *uses* existing directories — it never creates the stable dir.
 ///
 /// Returns `None` only when no bundled distrobox (stable or legacy) is present.
+///
+/// The division of labor with the container-level migration: folder-level
+/// resolution decides *where the app's bundle lives*; `distrobox_init_migration.rs`
+/// repairs containers whose baked-in path vanished externally (deleted dir,
+/// host distrobox uninstalled after a source switch).
 pub fn resolve_bundled_distrobox_path(file_system: &FileSystem) -> Option<PathBuf> {
-    ensure_stable_bundled_dir(file_system);
-    let path = get_bundled_distrobox_path();
-    if file_system.exists(&path) {
-        Some(path)
-    } else {
-        None
+    let stable = get_bundled_distrobox_path();
+    if file_system.exists(&stable) {
+        return Some(stable);
     }
-}
-
-/// Ensures the stable bundled directory exists. If it doesn't but a legacy
-/// versioned directory does, the legacy directory is *copied* (not moved) into
-/// the stable path so that already-created containers — which may reference the
-/// legacy absolute path — keep working.
-pub(crate) fn ensure_stable_bundled_dir(file_system: &FileSystem) {
-    let bundled_path = get_bundled_distrobox_path();
-    if file_system.exists(&bundled_path) {
-        return;
-    }
-    let Some((version, src_dir)) = find_latest_legacy_version_dir(file_system) else {
-        return;
-    };
-    let stable_dir = get_stable_bundled_dir();
-    if file_system
-        .write(&get_version_file_path(), &version)
-        .is_err()
-    {
-        tracing::warn!("Failed to write bundled version marker");
-        return;
-    }
-    if copy_dir_via_fs(file_system, &src_dir, &stable_dir).is_err() {
-        tracing::warn!("Failed to migrate bundled distrobox to stable path");
-        return;
-    }
-    tracing::info!(
-        "Migrated bundled distrobox {} to stable path {:?}",
-        version,
-        stable_dir
-    );
-}
-
-pub(crate) fn copy_dir_via_fs(file_system: &FileSystem, src: &Path, dst: &Path) -> io::Result<()> {
-    file_system.create_dir_all(dst)?;
-    for entry in file_system.read_dir(src)? {
-        let src_path = src.join(&entry);
-        let dst_path = dst.join(&entry);
-        match file_system.read_to_string(&src_path) {
-            Ok(content) => {
-                file_system.write(&dst_path, &content)?;
-            }
-            Err(_) => {
-                copy_dir_via_fs(file_system, &src_path, &dst_path)?;
-            }
-        }
-    }
-    Ok(())
+    find_latest_legacy_version_dir(file_system).map(|(_version, dir)| dir.join("distrobox"))
 }
 
 /// Scans for legacy `distrobox-<VERSION>/` directories and returns the version
@@ -334,118 +294,63 @@ pub async fn download_distrobox(
 mod tests {
     use super::*;
     use crate::fakers::NullFileSystemBuilder;
-    use std::path::Path;
 
-    // ── copy_dir_via_fs ────────────────────────────────────────────
-
-    #[test]
-    fn test_copy_dir_via_fs_flat() {
-        let fs = FileSystem::new_null();
-        fs.create_dir_all(Path::new("/src")).unwrap();
-        fs.write(Path::new("/src/a.txt"), "alpha").unwrap();
-        fs.write(Path::new("/src/b.txt"), "beta").unwrap();
-
-        copy_dir_via_fs(&fs, Path::new("/src"), Path::new("/dst")).unwrap();
-
-        assert!(fs.exists(Path::new("/dst")));
-        assert_eq!(fs.read_to_string(Path::new("/dst/a.txt")).unwrap(), "alpha");
-        assert_eq!(fs.read_to_string(Path::new("/dst/b.txt")).unwrap(), "beta");
-    }
+    // ── resolve_bundled_distrobox_path ─────────────────────────────
 
     #[test]
-    fn test_copy_dir_via_fs_nested() {
-        let fs = FileSystem::new_null();
-        fs.create_dir_all(Path::new("/src/sub/deep")).unwrap();
-        fs.write(Path::new("/src/top.txt"), "top").unwrap();
-        fs.write(Path::new("/src/sub/mid.txt"), "mid").unwrap();
-        fs.write(Path::new("/src/sub/deep/bottom.txt"), "bottom")
-            .unwrap();
-
-        copy_dir_via_fs(&fs, Path::new("/src"), Path::new("/dst")).unwrap();
-
-        assert_eq!(fs.read_to_string(Path::new("/dst/top.txt")).unwrap(), "top");
-        assert_eq!(
-            fs.read_to_string(Path::new("/dst/sub/mid.txt")).unwrap(),
-            "mid"
-        );
-        assert_eq!(
-            fs.read_to_string(Path::new("/dst/sub/deep/bottom.txt"))
-                .unwrap(),
-            "bottom"
-        );
-    }
-
-    #[test]
-    fn test_copy_dir_via_fs_empty() {
-        let fs = FileSystem::new_null();
-        fs.create_dir_all(Path::new("/src")).unwrap();
-
-        copy_dir_via_fs(&fs, Path::new("/src"), Path::new("/dst")).unwrap();
-
-        assert!(fs.exists(Path::new("/dst")));
-        let entries = fs.read_dir(Path::new("/dst")).unwrap();
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn test_copy_dir_via_fs_nonexistent_source() {
-        let fs = FileSystem::new_null();
-        let err = copy_dir_via_fs(&fs, Path::new("/nonexistent"), Path::new("/dst")).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    // ── ensure_stable_bundled_dir ──────────────────────────────────
-
-    #[test]
-    fn test_ensure_stable_bundled_dir_already_migrated() {
-        let bundled_binary = get_bundled_distrobox_path();
-        let fs = NullFileSystemBuilder::new()
-            .file(&bundled_binary, "#!/bin/sh\necho distrobox")
-            .build();
-
-        ensure_stable_bundled_dir(&fs);
-
-        assert!(fs.exists(&bundled_binary));
-        assert_eq!(
-            fs.read_to_string(&bundled_binary).unwrap(),
-            "#!/bin/sh\necho distrobox"
-        );
-    }
-
-    #[test]
-    fn test_ensure_stable_bundled_dir_legacy_migration() {
+    fn test_resolve_prefers_stable_over_legacy() {
         let base_dir = get_bundled_distrobox_dir();
-        let legacy_dir = base_dir.join("distrobox-1.0.0");
-        let legacy_binary = legacy_dir.join("distrobox");
-        let stable_dir = get_stable_bundled_dir();
-        let stable_binary = get_bundled_distrobox_path();
-        let version_file = get_version_file_path();
+        let stable = get_bundled_distrobox_path();
+        let legacy = base_dir.join("distrobox-9.9.9").join("distrobox");
 
         let fs = NullFileSystemBuilder::new()
-            .dir(&base_dir)
-            .dir(&legacy_dir)
-            .file(&legacy_binary, "#!/bin/sh\necho distrobox")
+            .file(&stable, "stable script")
+            .file(&legacy, "legacy script")
             .build();
 
-        ensure_stable_bundled_dir(&fs);
-
-        assert!(fs.exists(&stable_binary));
         assert_eq!(
-            fs.read_to_string(&stable_binary).unwrap(),
-            "#!/bin/sh\necho distrobox"
+            resolve_bundled_distrobox_path(&fs),
+            Some(stable),
+            "stable must win even when a semver-newer legacy dir exists"
         );
-        assert!(fs.exists(&version_file));
-        assert_eq!(fs.read_to_string(&version_file).unwrap(), "1.0.0");
-        assert!(fs.exists(&stable_dir));
     }
 
     #[test]
-    fn test_ensure_stable_bundled_dir_no_bundled() {
+    fn test_resolve_falls_back_to_newest_legacy() {
+        let base_dir = get_bundled_distrobox_dir();
+        let old = base_dir.join("distrobox-1.0.0").join("distrobox");
+        let newer = base_dir.join("distrobox-1.8.2.4").join("distrobox");
+        let newest = base_dir.join("distrobox-2.0.0").join("distrobox");
+
+        let fs = NullFileSystemBuilder::new()
+            .file(&old, "old script")
+            .file(&newer, "newer script")
+            .file(&newest, "newest script")
+            .build();
+
+        assert_eq!(
+            resolve_bundled_distrobox_path(&fs),
+            Some(newest),
+            "the highest semver legacy dir must be picked"
+        );
+    }
+
+    #[test]
+    fn test_resolve_skips_legacy_dir_without_distrobox_file() {
+        let base_dir = get_bundled_distrobox_dir();
+        let legacy = base_dir.join("distrobox-1.0.0");
+        let binary = legacy.join("distrobox");
+
+        let fs = NullFileSystemBuilder::new().dir(&base_dir).dir(&legacy).build();
+        assert!(!fs.exists(&binary));
+
+        assert_eq!(resolve_bundled_distrobox_path(&fs), None);
+    }
+
+    #[test]
+    fn test_resolve_none_when_nothing_installed() {
         let fs = FileSystem::new_null();
 
-        ensure_stable_bundled_dir(&fs);
-
-        let bundled_binary = get_bundled_distrobox_path();
-        assert!(!fs.exists(&bundled_binary));
+        assert_eq!(resolve_bundled_distrobox_path(&fs), None);
     }
 }

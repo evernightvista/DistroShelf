@@ -41,23 +41,40 @@ migration must therefore repair every `distrobox-*` sibling in the same pass.
 
 ## Two scenarios where the path becomes stale
 
-### 1. Upgrading the bundled distrobox (pre‑stable‑path releases)
+> **Division of labor.**  Where the app's *own* bundled executable lives is
+> decided by folder-level resolution in `src/distrobox_downloader.rs`: the
+> stable `distrobox-bundled/` directory wins when present, otherwise the newest
+> legacy versioned directory is used as-is.  That resolution never copies or
+> deletes anything.  The container-level migration described in this document
+> only fires when a path baked into a container *genuinely vanished* — the two
+> scenarios below.
 
-Older versions of DistroShelf extracted the bundled distrobox into a
+### 1. The baked-in path vanished
+
+Legacy DistroShelf releases extracted the bundled distrobox into a
 **version‑specific directory** such as:
 
 ```
 ~/.local/share/distroshelf/distrobox-1.7.2/distrobox-init
 ```
 
-Later DistroShelf versions adopted a **stable path** (`distrobox-bundled/`,
-no version in the name).  When DistroShelf updates the bundle, it replaces the
-`distrobox-bundled/` directory in place.  Containers created with the current
-stable path continue to work because the bind‑mount source does not move.
+Modern releases use a **stable path** (`distrobox-bundled/`, no version in
+the name).  When DistroShelf updates the bundle, it replaces the
+`distrobox-bundled/` directory in place, so containers created with the stable
+path continue to work because the bind‑mount source does not move.
 
-However, containers created by the old version‑specific bundle still reference
-the now‑deleted `distrobox-1.7.2/` directory.  Their entrypoint bind‑mount
-points to a non‑existent file, and the container will not start.
+The app **never deletes** legacy versioned directories.  A legacy-only install
+is resolved directly as the bundled executable (see the folder-level
+resolution above) until the first "Update bundled distrobox" download creates
+a real `distrobox-bundled/` directory; from then on new containers bake the
+stable path.
+
+A baked-in path only goes stale when the directory itself genuinely
+disappears — e.g. the user deletes a legacy bundle dir manually, or the host
+distrobox is uninstalled after switching the source (scenario 2).  Containers
+whose baked path vanished keep their entrypoint bind‑mount pointing at a
+non‑existent file, and the container will not start — that is what the
+migration below repairs.
 
 ### 2. Switching the distrobox source (bundled ↔ host)
 
@@ -79,7 +96,7 @@ distrobox is uninstalled), the containers break.
 |---------------------------|----------------------|-----|
 | Host-old → Host-new       | Yes | System package manager updates in-place at `/usr/bin/` |
 | Bundled-old → Bundled-new | Yes (with stable path) | `distrobox-bundled/` is replaced in-place |
-| Bundled-old-versioned → Bundled-new | **No** | Old versioned directory (`distrobox-1.7.2/`) is gone |
+| Bundled-old-versioned → Bundled-new | Yes | Legacy dir is never deleted; new containers bake the stable path after the first download |
 | Host → Bundled            | **No** | Hard — `/usr/bin/` is root‑owned, can't symlink |
 | Bundled → Host            | Yes (with symlink fix) | User‑owned paths accept symlinks, and host path is valid |
 
@@ -184,8 +201,9 @@ tries to invoke them.
 
 ## The porting strategy
 
-When DistroShelf detects that the active `distrobox-init` location has changed
-(either because the bundle was upgraded or the user switched sources), it will:
+When DistroShelf detects that a container's baked-in `distrobox-init` path no
+longer exists (the active location changed — e.g. the bundle moved or the user
+switched sources — or was deleted externally), it will:
 
 1. **Inspect every existing container** via `podman inspect` to find the
    host‑side bind‑mount whose destination is `/usr/bin/entrypoint`.
@@ -272,9 +290,16 @@ The migration should be implemented within DistroShelf's existing patterns:
 
   | Event | Rationale |
   |-------|-----------|
-  | Bundled distrobox download completes | Old versioned paths may now be stale |
-  | User changes `distrobox-executable` setting | Source switch (bundled ↔ host) |
-  | Application startup | Catch containers broken since last session |
+  | `distrobox_version` succeeds | The resolved executable may differ from what existing containers baked in (e.g. a new stable bundle now shadows a legacy dir) |
+  | `container_runtime` succeeds | Runtime detection succeeded, so containers can be inspected |
+
+  The other events one might expect funnel through those two triggers:
+  `distrobox_version` success is itself re-triggered by `download_distrobox`
+  ending (`bundled_distrobox_version().refetch()`) and by the
+  `distrobox-executable` setting changing, and both are re-triggered on
+  startup via `start_background_tasks`.  The actual `check_stale_containers`
+  call sites are `src/models/root_store.rs:303` (version success) and
+  `src/models/root_store.rs:315` (runtime success).
 
 - **UI**: A banner or infobar in the main window when stale containers are
   detected, with a one‑click "Migrate Containers" button that spawns the

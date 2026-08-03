@@ -371,6 +371,19 @@ mod imp {
         fn use_bundled_version(&self, btn: &gtk::Button) {
             let obj = self.obj();
 
+            // If a bundle (stable or legacy) already exists, no download is
+            // needed: resolve the existing executable and switch to it.
+            if obj.root_store().has_bundled_distrobox() {
+                btn.set_child(Some(&gtk::Label::new(Some(&gettext(
+                    "Use Bundled Version",
+                )))));
+                btn.set_sensitive(true);
+                obj.root_store()
+                    .set_distrobox_source(DistroboxSource::Bundled);
+                obj.root_store().bundled_distrobox_version().refetch();
+                return;
+            }
+
             // Show spinner in button
             let spinner = adw::Spinner::new();
             btn.set_child(Some(&spinner));

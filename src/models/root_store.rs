@@ -396,11 +396,7 @@ impl RootStore {
                         if new_source == DistroboxSource::Bundled {
                             let obj_clone = obj.clone();
                             glib::spawn_future_local(async move {
-                                if crate::distrobox_downloader::resolve_bundled_distrobox_path(
-                                    &obj_clone.file_system(),
-                                )
-                                .is_none()
-                                {
+                                if !obj_clone.has_bundled_distrobox() {
                                     obj_clone.download_distrobox();
                                 } else {
                                     obj_clone.bundled_distrobox_version().refetch();
@@ -576,6 +572,11 @@ impl RootStore {
 
     pub fn file_system(&self) -> FileSystem {
         self.imp().file_system.borrow().clone()
+    }
+
+    /// Whether a bundled distrobox (stable or legacy install) is resolvable.
+    pub fn has_bundled_distrobox(&self) -> bool {
+        crate::distrobox_downloader::resolve_bundled_distrobox_path(&self.file_system()).is_some()
     }
 
     pub fn terminal_repository(&self) -> TerminalRepository {
@@ -1924,6 +1925,59 @@ mod tests {
             store.current_view(),
             ViewType::Main,
             "should not redirect to Welcome when bundled is installed"
+        );
+    }
+
+    #[gtk::test]
+    fn test_no_welcome_redirect_when_legacy_bundled_is_installed() {
+        use crate::fakers::NullFileSystemBuilder;
+
+        let base_dir = crate::distrobox_downloader::get_bundled_distrobox_dir();
+        let legacy_dir = base_dir.join("distrobox-1.8.2.4");
+        let legacy_path = legacy_dir.join("distrobox");
+        let mut version_cmd = Command::new(&legacy_path);
+        version_cmd.arg("version");
+
+        let file_system = NullFileSystemBuilder::new()
+            .dir(&base_dir)
+            .dir(&legacy_dir)
+            .file(&legacy_path, "fake distrobox script")
+            .build();
+
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new()
+                .cmd_full(version_cmd, || Ok("distrobox: 1.8.2.4".to_string()))
+                .build(),
+            Settings::new_null(),
+            file_system,
+        );
+
+        store
+            .settings()
+            .set_string("distrobox-executable", "bundled")
+            .expect("distrobox-executable key must exist in schema");
+
+        store.start_background_tasks();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.distrobox_version().is_success()
+        });
+
+        assert!(
+            store.distrobox_version().is_success(),
+            "distrobox_version should succeed"
+        );
+        assert!(
+            store
+                .distrobox_version()
+                .data()
+                .is_some_and(|d| d.is_some()),
+            "distrobox_version should have data when a legacy bundle is installed"
+        );
+        assert_eq!(
+            store.current_view(),
+            ViewType::Main,
+            "should not redirect to Welcome when a legacy bundle is installed"
         );
     }
 
