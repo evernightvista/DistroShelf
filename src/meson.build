@@ -4,6 +4,9 @@ conf.set_quoted('PATH_ID', '/com/ranfdev/DistroShelf')
 conf.set_quoted('GETTEXT_PACKAGE', 'distroshelf')
 conf.set_quoted('LOCALEDIR', get_option('prefix') / get_option('localedir'))
 conf.set_quoted('PKGDATADIR', pkgdatadir)
+# The gresource built by this meson run. Tests (`cargo test`) load it to
+# register the app resources exactly like main.rs does at runtime.
+conf.set_quoted('GRESOURCE_PATH', meson.project_build_root() / 'data' / 'distroshelf.gresource')
 
 configure_file(
     input: 'config.rs.in',

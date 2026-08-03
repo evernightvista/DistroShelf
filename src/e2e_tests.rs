@@ -7,17 +7,35 @@ use std::time::Duration;
 use adw::prelude::*;
 
 use crate::application::DistroboxStoreTy;
+use crate::application::register_app_style_providers;
 use crate::fakers::Settings;
 use crate::gtk_utils::extract_widget_text;
+use crate::gtk_utils::save_screenshot_if_requested;
 use crate::gtk_utils::test_utils::spin_main_context_until;
 use crate::models::{DistroboxSource, RootStore, ViewType};
 use crate::widgets::DistroShelfWindow;
+
+/// Registers the app's resources (`distroshelf.gresource`, built by meson)
+/// and installs the app-wide styling (CSS + icon resource path), so e2e
+/// tests render with real icons — including the per-distro brand colors —
+/// instead of the `image-missing` placeholder and default text color. This
+/// mirrors production, where `main.rs` registers the same gresource and
+/// `DistroShelfApplication::activate` calls `register_app_style_providers`.
+fn register_app_resources() {
+    let resource = gtk::gio::Resource::load(crate::config::GRESOURCE_PATH)
+        .expect("distroshelf.gresource not found; build it with ninja");
+    gtk::gio::resources_register(&resource);
+    let display = gtk::gdk::Display::default().expect("e2e tests require a display");
+    register_app_style_providers(&display);
+}
 
 /// Boots the app like `DistroShelfApplication::recreate_window` does, but
 /// against the predefined null command runner of `store_ty` and first-boot
 /// (schema default) null settings.
 fn boot_first_start(store_ty: DistroboxStoreTy) -> (DistroShelfWindow, RootStore) {
     let _ = adw::init();
+
+    register_app_resources();
 
     let runner = store_ty
         .null_command_runner()
@@ -125,6 +143,8 @@ fn test_first_boot_with_host_distrobox_shows_containers() {
         assert_visible_string(&strings, container_name);
     }
 
+    let _ = save_screenshot_if_requested(&window, "e2e_first_boot_host_containers_main").unwrap();
+
     window.destroy();
 }
 
@@ -165,6 +185,9 @@ fn test_first_boot_without_host_distrobox_shows_welcome_requirements() {
     );
     assert_visible_string(&strings, "Container Runtime");
     assert_visible_string(&strings, "Not found - Please install Podman or Docker");
+
+    let _ = save_screenshot_if_requested(&window, "e2e_first_boot_without_host_welcome_requirements")
+        .unwrap();
 
     window.destroy();
 }
@@ -218,6 +241,7 @@ fn test_choosing_bundled_distrobox_shows_main_view() {
             .is_some_and(|exe| exe.is_bundled()),
         "the resolved distrobox executable must be the bundled one"
     );
+    let _ = save_screenshot_if_requested(&window, "e2e_choosing_bundled_distrobox_welcome").unwrap();
     continue_buttons[0].emit_clicked();
 
     // First boot preselects the desktop default terminal; continuing
@@ -248,6 +272,8 @@ fn test_choosing_bundled_distrobox_shows_main_view() {
     for container_name in ["Ubuntu", "Fedora"] {
         assert_visible_string(&strings, container_name);
     }
+
+    let _ = save_screenshot_if_requested(&window, "e2e_choosing_bundled_distrobox_main").unwrap();
 
     window.destroy();
 }

@@ -6,7 +6,7 @@ use gtk::prelude::*;
 mod typed_list_store;
 pub use typed_list_store::TypedListStore;
 mod terminal_colors;
-#[cfg(test)]
+#[allow(dead_code)]
 pub mod test_utils;
 #[allow(unused_imports)]
 pub use terminal_colors::ColorPalette;
@@ -14,6 +14,10 @@ pub use terminal_colors::ColorPalette;
 mod widget_text;
 #[allow(unused_imports)]
 pub use widget_text::{StringEntry, WidgetText, WidgetTextSnapshot, extract_widget_text};
+#[allow(dead_code)]
+mod screenshot;
+#[allow(unused_imports)]
+pub use screenshot::{ScreenshotError, save_screenshot, save_screenshot_if_requested};
 
 pub fn reconcile_properties<T: IsA<glib::Object>>(dest: &T, src: &T, properties: &[&str]) {
     for prop in dest.list_properties() {

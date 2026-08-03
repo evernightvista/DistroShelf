@@ -4,3 +4,5 @@ pub static PATH_ID: &str = @PATH_ID@;
 pub static GETTEXT_PACKAGE: &str = @GETTEXT_PACKAGE@;
 pub static LOCALEDIR: &str = @LOCALEDIR@;
 pub static PKGDATADIR: &str = @PKGDATADIR@;
+#[allow(dead_code)]
+pub static GRESOURCE_PATH: &str = @GRESOURCE_PATH@;

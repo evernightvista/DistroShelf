@@ -51,6 +51,13 @@ impl FileSystem {
         }
     }
 
+    pub fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        match self {
+            FileSystem::Real => std::fs::canonicalize(path),
+            FileSystem::Null(null) => null.canonicalize(path),
+        }
+    }
+
     pub fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         match self {
             FileSystem::Real => std::fs::create_dir_all(path),
@@ -158,6 +165,14 @@ impl NullFileSystem {
 
     fn exists(&self, path: &Path) -> bool {
         self.files.borrow().contains_key(path) || self.dirs.borrow().contains(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        if self.exists(path) {
+            Ok(path.to_path_buf())
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, format!("{path:?}")))
+        }
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -310,6 +325,28 @@ mod tests {
         assert!(!fs.exists(path));
         fs.write(path, "data").unwrap();
         assert!(fs.exists(path));
+    }
+
+    #[test]
+    fn test_canonicalize_real() {
+        let dir = std::env::temp_dir().join(format!("distroshelf-canon-{}", std::process::id()));
+        let fs = FileSystem::new_real();
+        assert!(fs.canonicalize(&dir).is_err());
+        fs.create_dir_all(&dir).unwrap();
+        let canonical = fs.canonicalize(&dir).unwrap();
+        assert!(canonical.is_absolute());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_canonicalize_null() {
+        let fs = FileSystem::new_null();
+        let path = Path::new("/some/dir/file.txt");
+        assert!(fs.canonicalize(path).is_err());
+        fs.write(path, "x").unwrap();
+        assert_eq!(fs.canonicalize(path).unwrap(), path);
+        fs.create_dir_all(Path::new("/some/dir")).unwrap();
+        assert_eq!(fs.canonicalize(Path::new("/some/dir")).unwrap(), Path::new("/some/dir"));
     }
 
     #[test]

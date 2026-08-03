@@ -55,6 +55,110 @@ pub enum DistroboxStoreTy {
 /// Path reported for the host distrobox by the null command runners.
 pub const NULL_HOST_DISTROBOX_PATH: &str = "/usr/bin/distrobox";
 
+/// The GResource prefix where the app bundles its icons
+/// (see `data/distroshelf.gresource.xml`).
+pub const APP_ICONS_RESOURCE_PATH: &str = "/com/ranfdev/DistroShelf/icons";
+
+/// Makes the icons bundled in the app's GResource (`data/icons`) resolvable
+/// by the icon theme, matching the `scalable/actions` layout of the hicolor
+/// theme. GTK only searches resources under the icon theme's registered
+/// resource paths; without this, every bundled icon (distro logos, etc.)
+/// falls back to the `image-missing` placeholder. Idempotent.
+pub fn register_app_icon_resource_path(display: &gdk::Display) {
+    let theme = gtk::IconTheme::for_display(display);
+    if !theme.resource_path().iter().any(|p| p == APP_ICONS_RESOURCE_PATH) {
+        theme.add_resource_path(APP_ICONS_RESOURCE_PATH);
+    }
+}
+
+/// Installs the app-wide CSS on `display` — including the per-distro brand
+/// colors that `DistroIcon` uses to tint the symbolic distro logos — and
+/// registers the bundled icon resource path. Called by the application on
+/// activation and by e2e tests, so tests render with the same styling as
+/// the production app.
+pub fn register_app_style_providers(display: &gdk::Display) {
+    let provider = gtk::CssProvider::new();
+    let known_distro_colors = &known_distros::generate_css();
+    provider.load_from_string(&format!("
+                {known_distro_colors}
+                .distro-color-fg {{
+                    color: var(--distro-color);
+                }}
+                .distro-color-bg {{
+                    background-color: var(--distro-color);
+                }}
+                
+                .distro-header {{
+                    background-color: color-mix(in xyz, var(--distro-color), var(--window-bg-color) 80%);
+                    border-radius: 12px;
+                    padding: 12px;
+                }}
+
+                .distro-row-item {{
+                    padding: 6px;
+                    border-radius: 6px;
+                }}
+
+                .output {{
+                    border-radius: 12px;
+                    border: 1px solid @borders;
+                }}
+                .tasks-popover row {{
+                    padding: 6px 12px;
+                    border-radius: 6px;
+                }}
+                .combo popover label {{
+                    min-width: 300px;
+                }}
+                
+                .status-dot {{
+                    border-radius: 9999px;
+                    background-color: @error_color;
+                }}
+                .status-dot.up {{
+                    background-color: @success_color;
+                }}
+                .status-dot.exited, .status-dot.created {{
+                    background-color: alpha(@borders, 0.5);
+                }}
+
+                button.xs {{
+                    font-size: 0.8em;
+                    padding: 0.2em 0.2em;
+                }}
+
+                @keyframes pop-warning {{
+                    0% {{
+                        transform: scale(1.0);
+                    }}
+                    30% {{
+                        transform: scale(1.2) rotateZ(20deg);
+                    }}
+                    70% {{
+                        transform: scale(1.4) rotateZ(-15deg);
+                    }}
+                }}
+
+                .task-warning {{
+                    animation: pop-warning 1s;
+                    animation-iteration-count: 3;
+                }}
+
+                .task-output-terminal {{
+                    padding: 8px;
+                    /* A larger radius isn't rendered properly in VTE, because the background of therminal is drawn over it */
+                    border-radius: 4px;
+                    border: 2px solid @borders;
+                }}
+            "));
+    gtk::style_context_add_provider_for_display(
+        display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    register_app_icon_resource_path(display);
+}
+
 impl DistroboxStoreTy {
     /// Predefined `CommandRunner` for the null store types, used by UI
     /// previews and end-to-end tests. Returns `None` for [`Self::Real`].
@@ -287,87 +391,8 @@ mod imp {
         // tries to launch a "second instance" of the application. When they try
         // to do that, we'll just present any existing window.
         fn activate(&self) {
-            let provider = gtk::CssProvider::new();
-            let known_distro_colors = &known_distros::generate_css();
-            provider.load_from_string(&format!("
-                {known_distro_colors}
-                .distro-color-fg {{
-                    color: var(--distro-color);
-                }}
-                .distro-color-bg {{
-                    background-color: var(--distro-color);
-                }}
-                
-                .distro-header {{
-                    background-color: color-mix(in xyz, var(--distro-color), var(--window-bg-color) 80%);
-                    border-radius: 12px;
-                    padding: 12px;
-                }}
-
-                .distro-row-item {{
-                    padding: 6px;
-                    border-radius: 6px;
-                }}
-
-                .output {{
-                    border-radius: 12px;
-                    border: 1px solid @borders;
-                }}
-                .tasks-popover row {{
-                    padding: 6px 12px;
-                    border-radius: 6px;
-                }}
-                .combo popover label {{
-                    min-width: 300px;
-                }}
-                
-                .status-dot {{
-                    border-radius: 9999px;
-                    background-color: @error_color;
-                }}
-                .status-dot.up {{
-                    background-color: @success_color;
-                }}
-                .status-dot.exited, .status-dot.created {{
-                    background-color: alpha(@borders, 0.5);
-                }}
-
-                button.xs {{
-                    font-size: 0.8em;
-                    padding: 0.2em 0.2em;
-                }}
-
-                @keyframes pop-warning {{
-                    0% {{
-                        transform: scale(1.0);
-                    }}
-                    30% {{
-                        transform: scale(1.2) rotateZ(20deg);
-                    }}
-                    70% {{
-                        transform: scale(1.4) rotateZ(-15deg);
-                    }}
-                }}
-
-                .task-warning {{
-                    animation: pop-warning 1s;
-                    animation-iteration-count: 3;
-                }}
-
-                .task-output-terminal {{
-                    padding: 8px;
-                    /* A larger radius isn't rendered properly in VTE, because the background of therminal is drawn over it */
-                    border-radius: 4px;
-                    border: 2px solid @borders;
-                }}
-            "));
-            // We give the CssProvided to the default screen so the CSS rules we added
-            // can be applied to our window.
-            gtk::style_context_add_provider_for_display(
-                &gdk::Display::default().expect("Could not connect to a display."),
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
+            let display = gdk::Display::default().expect("Could not connect to a display.");
+            register_app_style_providers(&display);
 
             let this = self.obj().clone();
             // Get the current window or create one if necessary

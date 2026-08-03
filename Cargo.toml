@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 gettext-rs = { version = "0.7", features = ["gettext-system"] }
 gtk = { version = "0.11", package = "gtk4", features = ["gnome_49"] }
+gsk = { version = "0.11", package = "gsk4" }
 thiserror = "1.0.64"
 async-channel = "2.3.1"
 async-process = "2.3.0"

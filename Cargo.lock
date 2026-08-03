@@ -246,6 +246,7 @@ dependencies = [
  "async-process",
  "futures",
  "gettext-rs",
+ "gsk4",
  "gtk4",
  "libadwaita",
  "regex",
