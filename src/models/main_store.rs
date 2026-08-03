@@ -518,9 +518,19 @@ impl MainStore {
         .await;
 
         if !stale.is_empty() {
+            // The migration banner is revealed whenever the stale list is
+            // non-empty, so the empty → non-empty transition is the moment it
+            // appears. Log the conditions that produced it either way.
+            let banner_was_hidden = self.stale_containers().is_empty();
             info!(
                 count = stale.len(),
-                "Found containers with stale distrobox-init paths"
+                banner = if banner_was_hidden { "shown" } else { "already-visible" },
+                runtime = detected.runtime.name(),
+                runtime_version = %detected.version,
+                distrobox_exe = %exe.path(),
+                current_init = %current_init.display(),
+                containers = ?stale,
+                "Found containers with stale distrobox-init paths (baked-in path no longer exists on the host)"
             );
         }
         let new_items: Vec<glib::BoxedAnyObject> =
