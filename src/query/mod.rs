@@ -1567,4 +1567,96 @@ mod tests {
             "fetches started while an earlier fetch was in flight must still complete: got {count}"
         );
     }
+
+    #[gtk::test]
+    fn test_throttle_trailing_final_data_reflects_latest_state() {
+        // Simulates the reload_till_up scenario: a throttled query whose
+        // fetcher returns a value that changes over time (e.g. a container
+        // transitioning from created → up).  A burst of refetch() calls
+        // (podman events) is followed by a single late refetch()
+        // (load_containers from reload_till_up).  The final applied data
+        // must reflect the latest state, not the pre-Up value seen by an
+        // earlier fetch whose result was superseded.
+        let interval = Duration::from_millis(50);
+        let outer_fetch_count = Arc::new(AtomicU32::new(0));
+        let fc = outer_fetch_count.clone();
+        let q = Query::<String>::new("throttle_final_state".into(), move || {
+            let fc = fc.clone();
+            async move {
+                // Simulate the container becoming Up once the second
+                // fetch starts — the leading edge sees "created",
+                // everything after sees "up".
+                let n = fc.fetch_add(1, Ordering::SeqCst);
+                Ok(if n > 0 { "up".into() } else { "created".into() })
+            }
+        });
+        q.set_refetch_strategy(Query::throttle(interval, true));
+
+        // Initial load — sees "created"
+        q.refetch();
+        spin_until(2, || q.data() == Some("created".into()));
+
+        // Burst of podman-event refetches (while the container is still
+        // starting — the fetcher has already "flipped" to up internally
+        // after the first call, but the leading-edge result was "created").
+        for _ in 0..5 {
+            q.refetch();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Single late load_containers from reload_till_up.
+        q.refetch();
+
+        // Wait for trailing edge(s) to fire and complete.
+        std::thread::sleep(interval * 2 + Duration::from_millis(100));
+        spin_until(1, || false);
+
+        assert_eq!(
+            q.data().as_deref(),
+            Some("up"),
+            "after throttle window + single late refetch, final data must be 'up'"
+        );
+    }
+
+    #[gtk::test]
+    fn test_throttle_trailing_slow_fetcher_data_always_latest() {
+        // Same scenario as above, but the fetcher is artificially slow.
+        // Multiple fetches overlap; the generation guard discards stale
+        // results, but the LAST fetch to complete must apply the latest
+        // value ("up").
+        let interval = Duration::from_millis(40);
+        let outer_fetch_count = Arc::new(AtomicU32::new(0));
+        let fc = outer_fetch_count.clone();
+        let q = Query::<String>::new("throttle_slow_final".into(), move || {
+            let fc = fc.clone();
+            async move {
+                // 100ms artificial delay — slower than the throttle interval
+                glib::timeout_future(Duration::from_millis(100)).await;
+                let n = fc.fetch_add(1, Ordering::SeqCst);
+                Ok(if n > 0 { "up".into() } else { "created".into() })
+            }
+        });
+        q.set_refetch_strategy(Query::throttle(interval, true));
+
+        q.refetch();
+        // Schedule trailing edges with rapid refetches.
+        std::thread::sleep(Duration::from_millis(5));
+        q.refetch();
+        std::thread::sleep(Duration::from_millis(5));
+        q.refetch();
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Late single refetch simulating reload_till_up's load_containers.
+        q.refetch();
+
+        // Wait long enough for all overlapping fetches + trailing edges.
+        std::thread::sleep(Duration::from_millis(400));
+        spin_until(1, || false);
+
+        assert_eq!(
+            q.data().as_deref(),
+            Some("up"),
+            "with slow overlapping fetches + trailing edge + late load_containers, final must be 'up'"
+        );
+    }
 }

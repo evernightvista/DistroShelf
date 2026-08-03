@@ -1223,10 +1223,22 @@ impl RootStore {
                 };
 
                 if let Status::Up(_) = &container.status {
+                    debug!(name = %name, "Container is now Up; calling load_containers");
                     this.load_containers();
                     return;
                 }
+                debug!(name = %name, i, status = %container.status, "Waiting for container to reach Up");
             }
+            // The container never reached Up within the polling window.
+            // Still trigger one final load_containers so the sidebar
+            // reflects whatever state the container ended up in — this
+            // guards against a race where Up appears just after our
+            // last poll and the podman events listener is down.
+            warn!(
+                name = %name,
+                "Container did not reach Up within polling window; scheduling a final load_containers as fallback"
+            );
+            this.load_containers();
         });
     }
 
