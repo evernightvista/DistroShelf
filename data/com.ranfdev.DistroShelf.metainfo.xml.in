@@ -80,6 +80,13 @@
   </screenshots>
 
   <releases>
+    <release version="1.5.1" date="2026-08-03">
+      <description translate="no">
+        <ul>
+          <li>Changed: Legacy bundled Distrobox installs are now resolved in place instead of being copied to the new stable directory.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-07-19">
       <description translate="no">
         <ul>
