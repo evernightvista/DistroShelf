@@ -112,7 +112,9 @@ pub struct QueryInner<T> {
     priority: glib::Priority,
 
     /// Monotonic counter incremented on each `fetch()`. Used to detect and
-    /// discard stale results from aborted in-flight fetches.
+    /// discard stale results from superseded in-flight fetches: a fetch that
+    /// started earlier keeps running (it is not aborted), but its result is
+    /// dropped when a newer fetch has been started in the meantime.
     fetch_generation: u64,
 }
 
@@ -643,11 +645,15 @@ where
         let key = { self.inner.borrow().key.clone() };
         debug!(resource_key = %key, "Fetch triggered for resource");
         let query_obj = { self.inner.borrow().query_obj.clone() };
-        // Cancel any previous fetch task before starting a new one
-        if let Some(handle) = self.inner.borrow_mut().fetch_task_handle.take() {
-            debug!(resource_key = %key, "Aborting previous fetch task");
-            handle.abort();
-        }
+
+        // Note: we deliberately do NOT abort a previous in-flight fetch here.
+        // Aborting it would defeat throttling's trailing edge: the trailing
+        // fetch of a throttle window starts while the previous fetch is still
+        // running (slow fetcher), and if every new fetch killed the previous
+        // one, no fetch would ever complete under a steady stream of events.
+        // Stale results from superseded fetches are discarded by the
+        // `fetch_generation` check in `execute_fetch`, so the last fetch's
+        // result still wins while every fetch runs to completion.
 
         // Enter the loading state. The outcome axis (`is_success`/`is_error`)
         // is intentionally left untouched so a background refetch keeps
@@ -1043,6 +1049,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Build a `QueryInner` with `last_success_at` set, for staleness/age tests.
     fn inner_with_success_at(last_success_at: Option<SystemTime>) -> QueryInner<String> {
@@ -1405,5 +1414,157 @@ mod tests {
         while context.pending() {
             context.iteration(false);
         }
+    }
+
+    /// Build a query whose fetcher increments a shared counter, with the given
+    /// throttle strategy already installed.
+    fn throttled_query(
+        interval: Duration,
+        trailing: bool,
+        fetch_count: Arc<AtomicU32>,
+    ) -> Query<i32> {
+        let fc = fetch_count.clone();
+        let q = Query::<i32>::new("test_throttle".into(), move || {
+            let fc = fc.clone();
+            async move {
+                fc.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            }
+        });
+        q.set_refetch_strategy(Query::throttle(interval, trailing));
+        q
+    }
+
+    #[gtk::test]
+    fn test_throttle_trailing_executes_last_call() {
+        // A call that lands inside the throttle window must never be dropped
+        // when `trailing` is enabled: even with no further calls, the trailing
+        // edge fires after the window elapses.
+        let fetch_count = Arc::new(AtomicU32::new(0));
+        let q = throttled_query(Duration::from_millis(50), true, fetch_count.clone());
+
+        q.refetch(); // leading edge: executes immediately
+        std::thread::sleep(Duration::from_millis(10));
+        q.refetch(); // throttled: trailing edge scheduled
+
+        spin_until(2, || fetch_count.load(Ordering::SeqCst) >= 2);
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "a throttled call must eventually be executed at the trailing edge"
+        );
+    }
+
+    #[gtk::test]
+    fn test_throttle_trailing_no_starvation() {
+        // Calls arriving continuously, faster than the interval, must not
+        // starve the trailing edge: every call is eventually executed by
+        // either a leading or a trailing fetch.
+        let interval = Duration::from_millis(50);
+        let fetch_count = Arc::new(AtomicU32::new(0));
+        let fetch_times: Arc<Mutex<Vec<Instant>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let fc = fetch_count.clone();
+        let ft = fetch_times.clone();
+        let q = Query::<i32>::new("throttle_no_starvation".into(), move || {
+            let fc = fc.clone();
+            let ft = ft.clone();
+            async move {
+                ft.lock().unwrap().push(Instant::now());
+                fc.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            }
+        });
+        q.set_refetch_strategy(Query::throttle(interval, true));
+
+        let mut call_times = Vec::new();
+        for _ in 0..9 {
+            q.refetch();
+            call_times.push(Instant::now());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Let the trailing edge of the last window fire.
+        spin_until(2, || fetch_count.load(Ordering::SeqCst) >= 3);
+        std::thread::sleep(interval + Duration::from_millis(20));
+        spin_until(1, || false);
+
+        // Every call must be executed: for each call there must be a fetch
+        // that started at or after it.
+        let fetch_times = fetch_times.lock().unwrap();
+        assert!(
+            fetch_times.len() >= 3,
+            "expected a leading fetch plus trailing edges, got {}",
+            fetch_times.len()
+        );
+        for call in &call_times {
+            assert!(
+                fetch_times.iter().any(|f| f >= call),
+                "a throttled call was never executed ({} fetches total)",
+                fetch_times.len()
+            );
+        }
+    }
+
+    #[gtk::test]
+    fn test_throttle_without_trailing_drops_window_calls() {
+        // With `trailing` disabled, calls inside the window are dropped by
+        // design — this documents the contrast with the trailing behavior.
+        // The interval is much larger than the sleep between calls so a
+        // wall-clock overshoot on a loaded machine cannot flip the second
+        // call from throttled to leading.
+        let fetch_count = Arc::new(AtomicU32::new(0));
+        let q = throttled_query(Duration::from_millis(200), false, fetch_count.clone());
+
+        q.refetch(); // leading edge: executes immediately
+        std::thread::sleep(Duration::from_millis(10));
+        q.refetch(); // throttled, no trailing -> dropped
+        std::thread::sleep(Duration::from_millis(250));
+        spin_until(1, || false);
+
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[gtk::test]
+    fn test_throttle_trailing_completes_despite_overlap() {
+        // The trailing edge must run to completion even when a newer fetch
+        // starts before it finishes: superseded fetches may be discarded by
+        // the generation check, but they must never be aborted, otherwise a
+        // slow fetcher plus a stream of events means no fetch ever completes.
+        let fetch_count = Arc::new(AtomicU32::new(0));
+        let fc = fetch_count.clone();
+        let q = Query::<i32>::new("throttle_overlap".into(), move || {
+            let fc = fc.clone();
+            async move {
+                glib::timeout_future(Duration::from_millis(80)).await;
+                fc.fetch_add(1, Ordering::SeqCst);
+                Ok(42)
+            }
+        });
+        q.set_refetch_strategy(Query::throttle(Duration::from_millis(40), true));
+
+        // First fetch starts and is still in flight when the trailing edge of
+        // the first window fires and starts a second fetch.
+        q.refetch();
+        std::thread::sleep(Duration::from_millis(10));
+        q.refetch(); // throttled -> trailing scheduled
+        std::thread::sleep(Duration::from_millis(70));
+        q.refetch(); // throttled again -> another trailing scheduled
+        std::thread::sleep(Duration::from_millis(70));
+        q.refetch(); // one more burst
+        std::thread::sleep(Duration::from_millis(10));
+
+        // All started fetches must run to completion; the count must reflect
+        // every fetch that actually executed its fetcher.
+        spin_until(3, || fetch_count.load(Ordering::SeqCst) >= 3);
+        std::thread::sleep(Duration::from_millis(120));
+        spin_until(1, || false);
+
+        let count = fetch_count.load(Ordering::SeqCst);
+        assert!(
+            count >= 3,
+            "fetches started while an earlier fetch was in flight must still complete: got {count}"
+        );
     }
 }
