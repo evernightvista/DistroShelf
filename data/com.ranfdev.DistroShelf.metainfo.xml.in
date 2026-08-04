@@ -80,6 +80,13 @@
   </screenshots>
 
   <releases>
+    <release version="1.5.2" date="2026-08-04">
+      <description translate="no">
+        <ul>
+          <li>Fix: Support Distrobox v2, which removed the `version` subcommand and changed the `--version` output format.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.1" date="2026-08-03">
       <description translate="no">
         <ul>
