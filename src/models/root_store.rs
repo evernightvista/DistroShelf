@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 use crate::backends::Distrobox;
 use crate::backends::Status;
 use crate::backends::container_runtime::{DetectedRuntime, get_container_runtime};
+use crate::backends::distrobox::command::default_cmd_factory;
 use crate::backends::supported_terminals::{Terminal, TerminalRepository};
 use crate::backends::{self, CreateArgs, ExportableApp};
 use crate::distrobox_init_migration::domain::{StaleContainer, current_init_path};
@@ -321,17 +322,12 @@ impl RootStore {
         this.imp().host_distrobox_version.set_fetcher(move || {
             let command_runner = this_clone.command_runner();
             async move {
-                let mut version_cmd = Command::new("distrobox");
-                version_cmd.arg("version");
-                let version = command_runner
-                    .output(version_cmd)
-                    .await
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .and_then(|o| {
-                        let text = String::from_utf8_lossy(&o.stdout).to_string();
-                        text.split(':').nth(1).map(|s| s.trim().to_string())
-                    });
+                let version = crate::backends::distrobox::fetch_distrobox_version(
+                    &command_runner,
+                    &default_cmd_factory(),
+                )
+                .await
+                .ok();
 
                 let mut path_cmd = Command::new("sh");
                 path_cmd.arg("-c").arg("command -v distrobox");
@@ -1844,6 +1840,46 @@ mod tests {
             ViewType::Welcome,
             "should redirect to Welcome when host distrobox is not available"
         );
+    }
+
+    #[gtk::test]
+    fn test_host_distrobox_version_detects_v2_with_flag_fallback() {
+        use crate::fakers::Command;
+        use std::os::unix::process::ExitStatusExt;
+
+        let store = RootStore::new(
+            NullCommandRunnerBuilder::new()
+                .cmd_full_with_status(
+                    Command::new_with_args("distrobox", ["version"]),
+                    ExitStatusExt::from_raw(3),
+                    || Ok("No help topic for 'version'".to_string()),
+                )
+                .cmd(&["distrobox", "--version"], "distrobox version 2.0.0-rc.4")
+                .cmd_full(
+                    Command::new_with_args("sh", ["-c", "command -v distrobox"]),
+                    || Ok("/usr/bin/distrobox".to_string()),
+                )
+                .build(),
+            Settings::new_null(),
+            FileSystem::new_null(),
+        );
+
+        store.host_distrobox_version().refetch();
+
+        spin_main_context_until(Duration::from_secs(5), || {
+            store.host_distrobox_version().is_success()
+        });
+
+        assert!(
+            store.host_distrobox_version().is_success(),
+            "host_distrobox_version should succeed"
+        );
+        let exe = store
+            .host_distrobox_version()
+            .data()
+            .flatten()
+            .expect("host distrobox should be detected via --version fallback");
+        assert_eq!(exe.version, "2.0.0-rc.4");
     }
 
     #[gtk::test]

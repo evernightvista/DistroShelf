@@ -18,6 +18,7 @@ use super::domain::{
     parse_exported_binaries_line, to_hex,
 };
 use crate::backends::distrobox::command::{CmdFactory, default_cmd_factory};
+use crate::backends::distrobox::fetch_distrobox_version;
 
 const POSIX_FIND_AND_CONCAT_DESKTOP_FILES: &str =
     include_str!("POSIX_FIND_AND_CONCAT_DESKTOP_FILES.sh");
@@ -755,25 +756,14 @@ impl Distrobox {
     // generate-entry
     // version
     pub async fn version(&self) -> Result<String, Error> {
-        let mut cmd = self.dbcmd();
-        cmd.arg("version");
-        let text = self.cmd_output_string(cmd).await?;
-        let mut parts = text.split(':');
-        if let Some(v) = parts.nth(1) {
-            let version = v.trim().to_string();
-            info!(
-                distrobox_version = %version,
-                raw_output = %text,
-                "Successfully parsed distrobox version"
-            );
-            Ok(version)
-        } else {
-            warn!(output = %text, "Failed to parse version from output");
-            Err(Error::ParseOutput(format!(
-                "Failed to parse version from output: {}",
-                text
-            )))
-        }
+        let version = fetch_distrobox_version(&self.cmd_runner, &self.cmd_factory)
+            .await
+            .inspect_err(|error| warn!(error = ?error, "Failed to detect distrobox version"))?;
+        info!(
+            distrobox_version = %version,
+            "Successfully parsed distrobox version"
+        );
+        Ok(version)
     }
 
     // help
@@ -854,6 +844,37 @@ d24405b14180 | ubuntu               | Created            | ghcr.io/ublue-os/ubun
             );
             assert_eq!(db.version().await?, "1.7.2.1".to_string(),);
             Ok(())
+        })
+    }
+
+    #[test]
+    fn version_falls_back_to_flag_for_v2() -> Result<(), Error> {
+        use std::os::unix::process::ExitStatusExt;
+        block_on(async {
+            let db = Distrobox::new(
+                NullCommandRunnerBuilder::new()
+                    .cmd_full_with_status(
+                        Command::new_with_args("distrobox", ["version"]),
+                        ExitStatusExt::from_raw(3),
+                        || Ok("No help topic for 'version'".to_string()),
+                    )
+                    .cmd(&["distrobox", "--version"], "distrobox version 2.0.0-rc.4")
+                    .build(),
+                default_cmd_factory(),
+            );
+            assert_eq!(db.version().await?, "2.0.0-rc.4".to_string());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn version_errors_when_no_probe_yields_a_version() {
+        block_on(async {
+            let db = Distrobox::new(
+                NullCommandRunnerBuilder::new().build(),
+                default_cmd_factory(),
+            );
+            assert!(matches!(db.version().await, Err(Error::ParseOutput(_))));
         })
     }
 
